@@ -101,7 +101,7 @@ doc.close()
 out_doc.close()
 return out_bytes
 
---- 🎨 Streamlit UI ---
+--- Streamlit UI ---
 st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="centered")
 
 st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
