@@ -9,45 +9,32 @@ import urllib.request
 def get_korean_font():
     font_path = "NanumGothic.ttf"
     if not os.path.exists(font_path):
-        # 구글 폰트에서 나눔고딕 다운로드
         url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
         urllib.request.urlretrieve(url, font_path)
     return font_path
 
-# --- 대본 텍스트 파싱 함수 (문자열 기준) ---
+# --- 대본 텍스트 파싱 함수 ---
 def parse_script_text(text):
-    # 정규식을 이용해 '[O페이지] 내용' 구조를 추출
     pattern = r'\[(\d+)페이지\](.*?)(?=\[\d+페이지\]|$)'
     matches = re.findall(pattern, text, re.DOTALL)
-    
     script_dict = {}
     for page_num_str, content in matches:
-        page_num = int(page_num_str)
-        script_dict[page_num] = content.strip()
-        
+        script_dict[int(page_num_str)] = content.strip()
     return script_dict
 
-# --- 대본 파일 파싱 함수 (파일 업로드 기준) ---
 def parse_script_bytes(txt_bytes):
-    # 윈도우 메모장(cp949)과 일반 UTF-8 인코딩 모두 대응
     try:
         text = txt_bytes.decode('utf-8')
     except UnicodeDecodeError:
         text = txt_bytes.decode('cp949')
     return parse_script_text(text)
 
-# --- 메인 PDF 처리 함수 ---
+# --- 메인 PDF 처리 함수 (방향 자동 인식 적용) ---
 def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
     CM_TO_PT = 28.3465
-    A4_WIDTH = 21.0 * CM_TO_PT 
-    A4_HEIGHT = 29.7 * CM_TO_PT
     MARGIN_PT = 8.0 * CM_TO_PT
     
-    FINAL_WIDTH = A4_WIDTH + MARGIN_PT
-    FINAL_HEIGHT = A4_HEIGHT
-    
     font_path = get_korean_font()
-    
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     out_doc = fitz.open()
     total_pages = len(doc)
@@ -57,41 +44,54 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         rect = page.rect
         orig_width, orig_height = rect.width, rect.height
         
-        scale = min(A4_WIDTH / orig_width, A4_HEIGHT / orig_height)
+        # 1. 원본 방향 감지하여 A4 크기 유동적 설정 (핵심 변경점)
+        if orig_width > orig_height:
+            # 가로형 슬라이드 (가로 29.7cm, 세로 21cm)
+            base_w = 29.7 * CM_TO_PT
+            base_h = 21.0 * CM_TO_PT
+        else:
+            # 세로형 문서 (가로 21cm, 세로 29.7cm)
+            base_w = 21.0 * CM_TO_PT
+            base_h = 29.7 * CM_TO_PT
+            
+        # 2. 비율 유지하며 화면에 꽉 차게 스케일링
+        scale = min(base_w / orig_width, base_h / orig_height)
         scaled_width, scaled_height = orig_width * scale, orig_height * scale
         
-        dx = (A4_WIDTH - scaled_width) / 2
-        dy = (A4_HEIGHT - scaled_height) / 2
+        dx = (base_w - scaled_width) / 2
+        dy = (base_h - scaled_height) / 2
+        
+        # 3. 최종 도화지 크기 설정 (기본 종이 크기 + 오른쪽 8cm 대본 여백)
+        FINAL_WIDTH = base_w + MARGIN_PT
+        FINAL_HEIGHT = base_h
         
         target_rect = fitz.Rect(dx, dy, dx + scaled_width, dy + scaled_height)
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         out_page.show_pdf_page(target_rect, doc, pno)
         
-        # 텍스트 삽입 로직
+        # 4. 텍스트 삽입 로직
         current_page_num = pno + 1
         if current_page_num in script_dict:
             script_text = script_dict[current_page_num]
             
             if script_text:
-                # 텍스트가 들어갈 상자 영역 지정 (오른쪽 8cm 여백 안쪽)
+                # 대본이 들어갈 위치 (기준 종이 가로 끝나는 지점부터 시작)
                 text_rect = fitz.Rect(
-                    A4_WIDTH + 10,       # x0
-                    20,                  # y0
-                    FINAL_WIDTH - 10,    # x1
-                    FINAL_HEIGHT - 20    # y1
+                    base_w + 10,       # x0 (슬라이드 끝 + 10pt 여백)
+                    20,                # y0 (위에서 20pt)
+                    FINAL_WIDTH - 10,  # x1 (전체 종이 끝 - 10pt)
+                    FINAL_HEIGHT - 20  # y1 (아래에서 20pt)
                 )
                 
-                # 폰트 등록 및 텍스트 삽입
                 out_page.insert_font(fontname="nanum", fontfile=font_path)
                 out_page.insert_textbox(
                     text_rect, 
                     script_text, 
-                    fontsize=10, 
+                    fontsize=11,       # 태블릿 가독성을 위해 글씨 크기 10 -> 11로 상향
                     fontname="nanum", 
                     align=fitz.TEXT_ALIGN_LEFT
                 )
         
-        # 진행률 업데이트
         progress = (pno + 1) / total_pages
         progress_bar.progress(progress)
         status_text.caption(f"대본 매칭 중... 📝 ({pno + 1} / {total_pages} 페이지 완료)")
@@ -108,11 +108,9 @@ st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
 st.markdown("PDF를 업로드하고 대본을 입력하면, 지정된 페이지 옆 여백에 텍스트를 자동으로 쏙 넣어줍니다.")
 st.write("---")
 
-# 1. PDF 업로드 영역
 st.subheader("1️⃣ PDF 파일 업로드")
 uploaded_pdf = st.file_uploader("변환할 PDF 파일을 올려주세요", type=["pdf"])
 
-# 2. 대본 입력 영역 (탭 분리)
 st.subheader("2️⃣ 강의 대본 입력 (선택)")
 tab1, tab2 = st.tabs(["📋 텍스트 직접 붙여넣기", "📄 TXT 파일 업로드"])
 
@@ -133,7 +131,6 @@ if uploaded_pdf is not None:
         status_text = st.empty()
         
         try:
-            # 대본 데이터를 가져올 우선순위 판단 (업로드 파일 > 붙여넣은 텍스트)
             script_dict = {}
             if uploaded_txt is not None:
                 txt_bytes = uploaded_txt.read()
@@ -141,7 +138,6 @@ if uploaded_pdf is not None:
             elif pasted_text.strip():
                 script_dict = parse_script_text(pasted_text)
             
-            # PDF 변환 및 텍스트 매칭
             input_bytes = uploaded_pdf.read()
             output_bytes = process_pdf_with_script(input_bytes, script_dict, progress_bar, status_text)
             
