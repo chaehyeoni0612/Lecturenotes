@@ -13,9 +13,8 @@ def get_korean_font():
         urllib.request.urlretrieve(url, font_path)
     return font_path
 
-# --- 대본 텍스트 파싱 함수 (인식률 대폭 강화) ---
+# --- 대본 텍스트 파싱 함수 ---
 def parse_script_text(text):
-    # 괄호 유무, 띄어쓰기 등 다양한 형태를 모두 유연하게 인식합니다.
     pattern = r'\[?(\d+)\s*페이지\]?[-:\s]*(.*?)(?=\[?\d+\s*페이지\]?[-:\s]*|$)'
     matches = re.findall(pattern, text, re.DOTALL)
     
@@ -23,9 +22,8 @@ def parse_script_text(text):
     for match in matches:
         page_num = int(match[0])
         content = match[1].strip()
-        if content: # 내용이 비어있지 않은 경우만 저장
+        if content:
             script_dict[page_num] = content
-            
     return script_dict
 
 def parse_script_bytes(txt_bytes):
@@ -36,7 +34,7 @@ def parse_script_bytes(txt_bytes):
     return parse_script_text(text)
 
 # --- 메인 PDF 처리 함수 ---
-def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
+def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text, is_landscape):
     CM_TO_PT = 28.3465
     MARGIN_PT = 8.0 * CM_TO_PT
     
@@ -50,11 +48,11 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         rect = page.rect
         orig_width, orig_height = rect.width, rect.height
         
-        # 1. 방향 인식 및 스케일링
-        if orig_width > orig_height:
-            base_w, base_h = 29.7 * CM_TO_PT, 21.0 * CM_TO_PT
+        # --- ✨ 사용자가 선택한 방향으로 강제 고정 ---
+        if is_landscape:
+            base_w, base_h = 29.7 * CM_TO_PT, 21.0 * CM_TO_PT  # 가로형
         else:
-            base_w, base_h = 21.0 * CM_TO_PT, 29.7 * CM_TO_PT
+            base_w, base_h = 21.0 * CM_TO_PT, 29.7 * CM_TO_PT  # 세로형
             
         scale = min(base_w / orig_width, base_h / orig_height)
         scaled_width, scaled_height = orig_width * scale, orig_height * scale
@@ -69,25 +67,25 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         out_page.show_pdf_page(target_rect, doc, pno)
         
-        # --- ✨ 디자인 포인트: 여백 구분용 회색 점선 그리기 ---
+        # 노트 필기용 회색 점선
         out_page.draw_line(
             fitz.Point(base_w, 20), 
             fitz.Point(base_w, FINAL_HEIGHT - 20), 
             color=(0.7, 0.7, 0.7), 
             width=1.0,
-            dashes="[3 3]" # 점선 스타일
+            dashes="[3 3]"
         )
         
-        # 2. 텍스트 삽입 로직
+        # 텍스트 삽입
         current_page_num = pno + 1
         if current_page_num in script_dict:
             script_text = script_dict[current_page_num]
             
             text_rect = fitz.Rect(
-                base_w + 10,       # x0 (슬라이드 끝 + 10pt)
-                20,                # y0
-                FINAL_WIDTH - 10,  # x1
-                FINAL_HEIGHT - 20  # y1
+                base_w + 10,       
+                20,                
+                FINAL_WIDTH - 10,  
+                FINAL_HEIGHT - 20  
             )
             
             out_page.insert_font(fontname="nanum", fontfile=font_path)
@@ -114,21 +112,31 @@ st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="
 st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
 st.write("---")
 
-st.subheader("1️⃣ PDF 파일 업로드")
+# ✨ 추가된 옵션: 용지 방향 직접 선택
+st.subheader("⚙️ 1. 용지 방향 선택")
+st.info("💡 강의록(PPT)은 가로형, 일반 문서나 논문은 세로형을 선택하세요.")
+orientation = st.radio(
+    "출력될 PDF의 기본 형태를 고르세요:",
+    ["가로형 (슬라이드 꽉 차게)", "세로형 (일반 문서)"],
+    horizontal=True
+)
+is_landscape = (orientation == "가로형 (슬라이드 꽉 차게)")
+st.write("---")
+
+st.subheader("📄 2. PDF 파일 업로드")
 uploaded_pdf = st.file_uploader("변환할 PDF 파일을 올려주세요", type=["pdf"])
 
-st.subheader("2️⃣ 강의 대본 입력 (선택)")
+st.subheader("📝 3. 강의 대본 입력 (선택)")
 tab1, tab2 = st.tabs(["📋 텍스트 직접 붙여넣기", "📄 TXT 파일 업로드"])
 
 with tab1:
     pasted_text = st.text_area(
-        "대본을 붙여넣으세요. (1페이지 내용 ... 양식으로 적으시면 됩니다)", 
+        "대본을 붙여넣으세요. (1페이지 내용 ... 양식)", 
         height=200
     )
 with tab2:
     uploaded_txt = st.file_uploader("또는 TXT 대본 파일을 업로드하세요", type=["txt"])
 
-# 실시간 대본 인식 상태 보여주기
 script_dict = {}
 if uploaded_txt is not None:
     script_dict = parse_script_bytes(uploaded_txt.read())
@@ -136,10 +144,7 @@ elif pasted_text.strip():
     script_dict = parse_script_text(pasted_text)
 
 if script_dict:
-    recognized_pages = ", ".join([str(k) for k in sorted(script_dict.keys())])
-    st.success(f"✅ 총 {len(script_dict)}개의 대본이 성공적으로 인식되었습니다! (인식된 페이지: {recognized_pages})")
-elif pasted_text.strip() or uploaded_txt is not None:
-    st.warning("⚠️ 텍스트를 입력하셨지만, '1페이지' 형태의 번호를 찾지 못했습니다. 번호 양식을 다시 확인해 주세요.")
+    st.success(f"✅ 총 {len(script_dict)}개의 대본이 성공적으로 인식되었습니다!")
 
 if uploaded_pdf is not None:
     st.write("---")
@@ -149,7 +154,8 @@ if uploaded_pdf is not None:
         
         try:
             input_bytes = uploaded_pdf.read()
-            output_bytes = process_pdf_with_script(input_bytes, script_dict, progress_bar, status_text)
+            # is_landscape 값을 함수로 넘겨주어 방향을 강제합니다.
+            output_bytes = process_pdf_with_script(input_bytes, script_dict, progress_bar, status_text, is_landscape)
             
             status_text.text("🎉 모든 작업 완료!")
             st.balloons()
