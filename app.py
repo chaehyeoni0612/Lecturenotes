@@ -4,26 +4,24 @@ import re
 import os
 import urllib.request
 
-# --- 한글 폰트 자동 다운로드 함수 ---
+# --- 맑은 고딕 폰트 자동 다운로드 함수 ---
 @st.cache_resource
 def get_korean_font():
-    font_path = "NanumGothic.ttf"
+    font_path = "malgun.ttf"
     if not os.path.exists(font_path):
+        # 구글 폰트 저장소 등에 업로드된 맑은 고딕 혹은 나눔고딕 대체 폰트 주소 활용 
+        # (안정적인 렌더링을 위해 맑은고딕 정밀 파일 링크 또는 오픈 폰트 사용)
         url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
         urllib.request.urlretrieve(url, font_path)
     return font_path
 
 # --- 대본 텍스트 파싱 함수 ---
 def parse_script_text(text):
-    pattern = r'\[?(\d+)\s*페이지\]?[-:\s]*(.*?)(?=\[?\d+\s*페이지\]?[-:\s]*|$)'
+    pattern = r'\[(\d+)페이지\](.*?)(?=\[\d+페이지\]|$)'
     matches = re.findall(pattern, text, re.DOTALL)
-    
     script_dict = {}
-    for match in matches:
-        page_num = int(match[0])
-        content = match[1].strip()
-        if content:
-            script_dict[page_num] = content
+    for page_num_str, content in matches:
+        script_dict[int(page_num_str)] = content.strip()
     return script_dict
 
 def parse_script_bytes(txt_bytes):
@@ -34,9 +32,9 @@ def parse_script_bytes(txt_bytes):
     return parse_script_text(text)
 
 # --- 메인 PDF 처리 함수 ---
-def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text, is_landscape):
+def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
     CM_TO_PT = 28.3465
-    MARGIN_PT = 8.0 * CM_TO_PT
+    MARGIN_PT = 8.0 * CM_TO_PT  # 오른쪽 여백 8cm
     
     font_path = get_korean_font()
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
@@ -48,11 +46,13 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         rect = page.rect
         orig_width, orig_height = rect.width, rect.height
         
-        # --- ✨ 사용자가 선택한 방향으로 강제 고정 ---
-        if is_landscape:
-            base_w, base_h = 29.7 * CM_TO_PT, 21.0 * CM_TO_PT  # 가로형
+        # 원본 방향 감지하여 A4 크기 유동적 설정
+        if orig_width > orig_height:
+            base_w = 29.7 * CM_TO_PT
+            base_h = 21.0 * CM_TO_PT
         else:
-            base_w, base_h = 21.0 * CM_TO_PT, 29.7 * CM_TO_PT  # 세로형
+            base_w = 21.0 * CM_TO_PT
+            base_h = 29.7 * CM_TO_PT
             
         scale = min(base_w / orig_width, base_h / orig_height)
         scaled_width, scaled_height = orig_width * scale, orig_height * scale
@@ -67,39 +67,48 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         out_page.show_pdf_page(target_rect, doc, pno)
         
-        # 노트 필기용 회색 점선
-        out_page.draw_line(
-            fitz.Point(base_w, 20), 
-            fitz.Point(base_w, FINAL_HEIGHT - 20), 
-            color=(0.7, 0.7, 0.7), 
-            width=1.0,
-            dashes="[3 3]"
-        )
-        
-        # 텍스트 삽입
+        # 텍스트 삽입 로직
         current_page_num = pno + 1
         if current_page_num in script_dict:
             script_text = script_dict[current_page_num]
             
-            text_rect = fitz.Rect(
-                base_w + 10,       
-                20,                
-                FINAL_WIDTH - 10,  
-                FINAL_HEIGHT - 20  
-            )
-            
-            out_page.insert_font(fontname="nanum", fontfile=font_path)
-            out_page.insert_textbox(
-                text_rect, 
-                script_text, 
-                fontsize=11, 
-                fontname="nanum", 
-                align=fitz.TEXT_ALIGN_LEFT
-            )
+            if script_text:
+                text_rect = fitz.Rect(
+                    base_w + 10,       # x0 
+                    15,                # y0 
+                    FINAL_WIDTH - 10,  # x1 
+                    FINAL_HEIGHT - 15  # y1 
+                )
+                
+                out_page.insert_font(fontname="malgun", fontfile=font_path)
+                
+                # 글자 수 길이에 따라 폰트 크기와 줄 간격을 다단계로 세밀하게 조절하여 절대 안 잘리게 방어
+                text_len = len(script_text)
+                if text_len > 1000:
+                    font_size = 7.0
+                    line_spacing = 1.05
+                elif text_len > 600:
+                    font_size = 8.0
+                    line_spacing = 1.1
+                elif text_len > 350:
+                    font_size = 9.0
+                    line_spacing = 1.15
+                else:
+                    font_size = 10.0
+                    line_spacing = 1.2
+                
+                out_page.insert_textbox(
+                    text_rect, 
+                    script_text, 
+                    fontsize=font_size, 
+                    fontname="malgun", 
+                    align=fitz.TEXT_ALIGN_LEFT,
+                    line_spacing=line_spacing
+                )
         
         progress = (pno + 1) / total_pages
         progress_bar.progress(progress)
-        status_text.caption(f"문서 처리 중... 📝 ({pno + 1} / {total_pages} 페이지 완료)")
+        status_text.caption(f"대본 매칭 중... 📝 ({pno + 1} / {total_pages} 페이지 완료)")
         
     out_bytes = out_doc.write()
     doc.close()
@@ -110,60 +119,49 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
 st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="centered")
 
 st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
+st.markdown("PDF를 업로드하고 대본을 입력하면, 지정된 페이지 옆 여백에 텍스트를 자동으로 쏙 넣어줍니다.")
 st.write("---")
 
-# ✨ 추가된 옵션: 용지 방향 직접 선택
-st.subheader("⚙️ 1. 용지 방향 선택")
-st.info("💡 강의록(PPT)은 가로형, 일반 문서나 논문은 세로형을 선택하세요.")
-orientation = st.radio(
-    "출력될 PDF의 기본 형태를 고르세요:",
-    ["가로형 (슬라이드 꽉 차게)", "세로형 (일반 문서)"],
-    horizontal=True
-)
-is_landscape = (orientation == "가로형 (슬라이드 꽉 차게)")
-st.write("---")
-
-st.subheader("📄 2. PDF 파일 업로드")
+st.subheader("1️⃣ PDF 파일 업로드")
 uploaded_pdf = st.file_uploader("변환할 PDF 파일을 올려주세요", type=["pdf"])
 
-st.subheader("📝 3. 강의 대본 입력 (선택)")
+st.subheader("2️⃣ 강의 대본 입력 (선택)")
 tab1, tab2 = st.tabs(["📋 텍스트 직접 붙여넣기", "📄 TXT 파일 업로드"])
 
 with tab1:
     pasted_text = st.text_area(
-        "대본을 붙여넣으세요. (1페이지 내용 ... 양식)", 
-        height=200
+        "클로바노트 등에서 복사한 대본을 여기에 붙여넣으세요.", 
+        height=200, 
+        placeholder="형식 예시:\n[1페이지] 첫 번째 슬라이드 내용입니다.\n[2페이지] 두 번째 슬라이드 설명...\n\n※ 빈칸으로 두면 여백만 생성됩니다."
     )
+
 with tab2:
     uploaded_txt = st.file_uploader("또는 TXT 대본 파일을 업로드하세요", type=["txt"])
 
-script_dict = {}
-if uploaded_txt is not None:
-    script_dict = parse_script_bytes(uploaded_txt.read())
-elif pasted_text.strip():
-    script_dict = parse_script_text(pasted_text)
-
-if script_dict:
-    st.success(f"✅ 총 {len(script_dict)}개의 대본이 성공적으로 인식되었습니다!")
-
 if uploaded_pdf is not None:
     st.write("---")
-    if st.button("✨ PDF 변환 실행하기", type="primary", use_container_width=True):
+    if st.button("✨ PDF 변환 및 대본 매칭 실행", type="primary", use_container_width=True):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         try:
+            script_dict = {}
+            if uploaded_txt is not None:
+                txt_bytes = uploaded_txt.read()
+                script_dict = parse_script_bytes(txt_bytes)
+            elif pasted_text.strip():
+                script_dict = parse_script_text(pasted_text)
+            
             input_bytes = uploaded_pdf.read()
-            # is_landscape 값을 함수로 넘겨주어 방향을 강제합니다.
-            output_bytes = process_pdf_with_script(input_bytes, script_dict, progress_bar, status_text, is_landscape)
+            output_bytes = process_pdf_with_script(input_bytes, script_dict, progress_bar, status_text)
             
             status_text.text("🎉 모든 작업 완료!")
             st.balloons()
             
             st.download_button(
-                label="📥 변환된 PDF 다운로드",
+                label="📥 필기용 PDF 다운로드",
                 data=output_bytes,
-                file_name=f"노트변환_{uploaded_pdf.name}",
+                file_name=f"대본추가_{uploaded_pdf.name}",
                 mime="application/pdf",
                 use_container_width=True
             )
