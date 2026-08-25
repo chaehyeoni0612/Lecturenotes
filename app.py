@@ -9,8 +9,6 @@ import urllib.request
 def get_korean_font():
     font_path = "malgun.ttf"
     if not os.path.exists(font_path):
-        # 구글 폰트 저장소 등에 업로드된 맑은 고딕 혹은 나눔고딕 대체 폰트 주소 활용 
-        # (안정적인 렌더링을 위해 맑은고딕 정밀 파일 링크 또는 오픈 폰트 사용)
         url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
         urllib.request.urlretrieve(url, font_path)
     return font_path
@@ -31,7 +29,7 @@ def parse_script_bytes(txt_bytes):
         text = txt_bytes.decode('cp949')
     return parse_script_text(text)
 
-# --- 메인 PDF 처리 함수 ---
+# --- 메인 PDF 처리 함수 (가로/세로 자동 인식 + 폰트 자동 축소 적용) ---
 def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
     CM_TO_PT = 28.3465
     MARGIN_PT = 8.0 * CM_TO_PT  # 오른쪽 여백 8cm
@@ -46,7 +44,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         rect = page.rect
         orig_width, orig_height = rect.width, rect.height
         
-        # 원본 방향 감지하여 A4 크기 유동적 설정
+        # 1. 원본 방향 감지하여 A4 크기 유동적 설정 (가로/세로 자동 맞춤)
         if orig_width > orig_height:
             base_w = 29.7 * CM_TO_PT
             base_h = 21.0 * CM_TO_PT
@@ -67,7 +65,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         out_page.show_pdf_page(target_rect, doc, pno)
         
-        # 텍스트 삽입 로직
+        # 2. 텍스트 삽입 로직
         current_page_num = pno + 1
         if current_page_num in script_dict:
             script_text = script_dict[current_page_num]
@@ -82,28 +80,25 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                 
                 out_page.insert_font(fontname="malgun", fontfile=font_path)
                 
-                # 글자 수 길이에 따라 폰트 크기와 줄 간격을 다단계로 세밀하게 조절하여 절대 안 잘리게 방어
+                # 글자 수가 많을 때 폰트 사이즈를 단계별로 대폭 줄여서 절대 안 잘리게 방어
                 text_len = len(script_text)
-                if text_len > 1000:
+                if text_len > 1200:
+                    font_size = 6.0
+                elif text_len > 800:
                     font_size = 7.0
-                    line_spacing = 1.05
-                elif text_len > 600:
+                elif text_len > 500:
                     font_size = 8.0
-                    line_spacing = 1.1
-                elif text_len > 350:
+                elif text_len > 300:
                     font_size = 9.0
-                    line_spacing = 1.15
                 else:
                     font_size = 10.0
-                    line_spacing = 1.2
                 
                 out_page.insert_textbox(
                     text_rect, 
                     script_text, 
                     fontsize=font_size, 
                     fontname="malgun", 
-                    align=fitz.TEXT_ALIGN_LEFT,
-                    line_spacing=line_spacing
+                    align=fitz.TEXT_ALIGN_LEFT
                 )
         
         progress = (pno + 1) / total_pages
