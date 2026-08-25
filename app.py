@@ -29,7 +29,7 @@ def parse_script_bytes(txt_bytes):
         text = txt_bytes.decode('cp949')
     return parse_script_text(text)
 
-# --- 메인 PDF 처리 함수 (에러 없는 자체 텍스트 분할 알고리즘 적용) ---
+# --- 메인 PDF 처리 함수 ---
 def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
     CM_TO_PT = 28.3465
     MARGIN_PT = 8.0 * CM_TO_PT  # 오른쪽 여백 8cm
@@ -75,10 +75,11 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                 out_page.insert_font(fontname="malgun", fontfile=font_path)
                 
                 # 가로/세로 방향에 따라 한 페이지에 들어갈 수 있는 안전한 최대 글자 수 설정
-                max_main_chars = 850 if is_landscape else 1100
-                max_extra_chars = 2200 if is_landscape else 2600
+                # (이전보다 뒷페이지 글자수를 절반 가까이 확 줄였습니다!)
+                max_main_chars = 800 if is_landscape else 1000
+                max_extra_chars = 1000 if is_landscape else 1200 
                 
-                # 자체 텍스트 분할 알고리즘 (에러 원천 차단)
+                # 자체 텍스트 분할 알고리즘
                 chunks = []
                 current_chunk = ""
                 is_first = True
@@ -118,15 +119,15 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                     extra_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
                     extra_page.insert_font(fontname="malgun", fontfile=font_path)
                     
-                    # 새 페이지 좌측 상단에 원본 슬라이드 1/4 크기로 축소 삽입 (가로세로 50%)
+                    # 새 페이지 좌측 상단에 원본 슬라이드 1/4 크기로 축소 삽입
                     mini_w = scaled_width * 0.5
                     mini_h = scaled_height * 0.5
                     mini_rect = fitz.Rect(20, 20, 20 + mini_w, 20 + mini_h)
                     extra_page.show_pdf_page(mini_rect, doc, pno)
                     
-                    # 텍스트 영역: 미니 슬라이드 오른쪽 빈 공간부터 아래쪽까지 넓게 활용
+                    # 텍스트 영역: 미니 슬라이드 오른쪽 빈 공간
                     extra_text_rect = fitz.Rect(
-                        20 + mini_w + 15,  # 미니 슬라이드 우측 + 약간의 여백
+                        20 + mini_w + 15,  
                         20,                
                         FINAL_WIDTH - 15,  
                         FINAL_HEIGHT - 20  
