@@ -76,7 +76,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                 
                 # --- 💡 바로 이 부분 수치를 중간으로 조정했습니다! ---
                 # 가로형(landscape)일 때와 세로형(portrait)일 때의 최대 글자 수 
-                max_main_chars = 950 if is_landscape else 1150
+                max_main_chars = 900 if is_landscape else 1100
                 max_extra_chars = 1600 if is_landscape else 1800 
                 # ------------------------------------------------
                 
