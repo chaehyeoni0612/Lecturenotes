@@ -74,10 +74,11 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
             if script_text:
                 out_page.insert_font(fontname="malgun", fontfile=font_path)
                 
-                # 가로/세로 방향에 따라 한 페이지에 들어갈 수 있는 안전한 최대 글자 수 설정
-                # (이전보다 뒷페이지 글자수를 절반 가까이 확 줄였습니다!)
-                max_main_chars = 800 if is_landscape else 1000
-                max_extra_chars = 1000 if is_landscape else 1200 
+                # --- 💡 바로 이 부분 수치를 중간으로 조정했습니다! ---
+                # 가로형(landscape)일 때와 세로형(portrait)일 때의 최대 글자 수 
+                max_main_chars = 1100 if is_landscape else 1300
+                max_extra_chars = 1600 if is_landscape else 1800 
+                # ------------------------------------------------
                 
                 # 자체 텍스트 분할 알고리즘
                 chunks = []
@@ -114,7 +115,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                     align=fitz.TEXT_ALIGN_LEFT
                 )
                 
-                # 3. 텍스트가 남았다면 필요한 만큼 무한대로 뒷페이지 생성!
+                # 3. 텍스트가 남았다면 필요한 만큼 무한대로 뒷페이지 생성
                 for i in range(1, len(chunks)):
                     extra_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
                     extra_page.insert_font(fontname="malgun", fontfile=font_path)
@@ -125,7 +126,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                     mini_rect = fitz.Rect(20, 20, 20 + mini_w, 20 + mini_h)
                     extra_page.show_pdf_page(mini_rect, doc, pno)
                     
-                    # 텍스트 영역: 미니 슬라이드 오른쪽 빈 공간
+                    # 텍스트 영역: 미니 슬라이드 오른쪽 빈 공간부터 전체 활용
                     extra_text_rect = fitz.Rect(
                         20 + mini_w + 15,  
                         20,                
