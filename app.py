@@ -7,9 +7,9 @@ import urllib.request
 # --- 맑은 고딕 폰트 자동 다운로드 함수 ---
 @st.cache_resource
 def get_korean_font():
-    font_path = "malgun.ttf"
+    font_path = "NotoSansKR-Regular.ttf"
     if not os.path.exists(font_path):
-        url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
+        url = "https://github.com/google/fonts/raw/main/ofl/notosanskr/NotoSansKR-Regular.ttf"
         urllib.request.urlretrieve(url, font_path)
     return font_path
 
