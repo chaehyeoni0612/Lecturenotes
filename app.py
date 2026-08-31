@@ -9,7 +9,7 @@ import urllib.request
 def get_korean_font():
     font_path = "NotoSansKR-Regular.ttf"
     if not os.path.exists(font_path):
-        url = "https://github.com/google/fonts/raw/main/ofl/notosanskr/NotoSansKR-Regular.ttf"
+        url = "https://github.com/google/fonts/raw/main/ofl/notosanskr/static/NotoSansKR-Regular.ttf"
         urllib.request.urlretrieve(url, font_path)
     return font_path
 
