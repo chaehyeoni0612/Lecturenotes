@@ -13,13 +13,22 @@ def get_korean_font():
         urllib.request.urlretrieve(url, font_path)
     return font_path
 
-# --- 대본 텍스트 파싱 함수 ---
+# --- 대본 텍스트 파싱 함수 (태그 없는 족보/추가 텍스트 누락 방지 보완) ---
 def parse_script_text(text):
-    pattern = r'\[(\d+)페이지\](.*?)(?=\[\d+페이지\]|$)'
-    matches = re.findall(pattern, text, re.DOTALL)
+    # [숫자페이지] 기준으로 텍스트를 안전하게 쪼개는 로직
+    splits = re.split(r'\[(\d+)페이지\]', text)
     script_dict = {}
-    for page_num_str, content in matches:
-        script_dict[int(page_num_str)] = content.strip()
+    
+    # splits[0]은 첫 태그 앞의 잔여 텍스트이므로 무시하고, (번호, 내용) 쌍으로 처리
+    for i in range(1, len(splits), 2):
+        if i + 1 < len(splits):
+            page_num = int(splits[i])
+            content = splits[i+1].strip()
+            # 만약 같은 페이지 번호가 여러 개면 내용 합치기
+            if page_num in script_dict:
+                script_dict[page_num] += "\n" + content
+            else:
+                script_dict[page_num] = content
     return script_dict
 
 def parse_script_bytes(txt_bytes):
@@ -44,23 +53,18 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         orig_rect = page.rect
         orig_width, orig_height = orig_rect.width, orig_rect.height
         
-        # 1. 각 페이지 고유의 가로/세로 크기에 맞춰 우측만 딱 8cm 늘어난 새 페이지 생성 (에러 원천 차단)
         FINAL_WIDTH = orig_width + MARGIN_PT
         FINAL_HEIGHT = orig_height
         
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
-        
-        # 배경을 하얀색으로 채우기
         out_page.draw_rect(out_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
         
-        # 원본 페이지를 왼쪽 자리에 그대로 그림
         source_rect = fitz.Rect(0, 0, orig_width, orig_height)
         out_page.show_pdf_page(source_rect, doc, pno)
         
         current_page_num = pno + 1
         script_text = script_dict.get(current_page_num, "").strip()
         
-        # --- [2단계] 대본이 있는 페이지에만 텍스트 삽입 및 동적 페이지 추가 ---
         if script_text:
             out_page.insert_font(fontname="malgun", fontfile=font_path)
             
@@ -110,7 +114,6 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                 chunks.append(current_chunk.strip())
             
             if chunks:
-                # 메인 페이지 우측 여백에 첫 번째 조각 삽입
                 text_rect = fitz.Rect(orig_width + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
                 out_page.insert_textbox(
                     text_rect, 
@@ -120,7 +123,6 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                     align=fitz.TEXT_ALIGN_LEFT
                 )
                 
-                # 글자가 넘치면 뒷페이지 무한 동적 생성 (1/4 미니 슬라이드 포함)
                 for i in range(1, len(chunks)):
                     extra_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
                     extra_page.draw_rect(extra_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
