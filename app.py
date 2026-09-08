@@ -34,7 +34,7 @@ def parse_script_bytes(txt_bytes):
         text = txt_bytes.decode('cp949')
     return parse_script_text(text)
 
-# --- 메인 PDF 처리 함수 (오전 버전의 완벽한 안정성 구조 복원 + 맑은 고딕 적용) ---
+# --- 메인 PDF 처리 함수 (가로/세로 방향 완벽 대응 1:1 매칭) ---
 def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
     CM_TO_PT = 28.3465
     MARGIN_PT = 8.0 * CM_TO_PT  # 오른쪽 여백 8cm
@@ -49,26 +49,36 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         orig_rect = page.rect
         orig_width, orig_height = orig_rect.width, orig_rect.height
         
-        FINAL_WIDTH = orig_width + MARGIN_PT
-        FINAL_HEIGHT = orig_height
+        # 💡 핵심 수정: 가로 슬라이드인지 세로 슬라이드인지 정확히 판별
+        is_landscape = orig_width > orig_height
         
-        # 1. 족보 및 모든 페이지를 100% 에러 없이 그대로 가져오는 표준 1:1 매칭 생성
+        if is_landscape:
+            # 가로 슬라이드인 경우: 너비에 8cm 여백 추가, 높이 유지
+            FINAL_WIDTH = orig_width + MARGIN_PT
+            FINAL_HEIGHT = orig_height
+        else:
+            # 세로 슬라이드인 경우: 너비에 8cm 여백 추가, 높이 유지
+            FINAL_WIDTH = orig_width + MARGIN_PT
+            FINAL_HEIGHT = orig_height
+        
+        # 새 페이지 생성 및 백색 배경 채우기
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         out_page.draw_rect(out_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
         
+        # 원본 슬라이드를 왼쪽에 정방향 그대로 배치
         source_rect = fitz.Rect(0, 0, orig_width, orig_height)
         out_page.show_pdf_page(source_rect, doc, pno)
         
         current_page_num = pno + 1
         script_text = script_dict.get(current_page_num, "").strip()
         
-        # 2. 대본이 있는 경우 우측 여백에 맑은 고딕으로 선명하게 삽입
+        # 대본이 있는 경우 우측 8cm 여백에 맑은 고딕으로 삽입
         if script_text:
             out_page.insert_font(fontname="malgun", fontfile=font_path)
             
+            # 우측 여백 영역 지정
             text_rect = fitz.Rect(orig_width + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
             
-            # 글자 수 길이에 따라 폰트 크기 자동 조절 (깨짐 현상 방지)
             text_len = len(script_text)
             if text_len > 1500:
                 font_size = 6.0
