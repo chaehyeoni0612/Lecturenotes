@@ -1,17 +1,6 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import re
-import os
-import urllib.request
-
-# --- 맑은 고딕 폰트 자동 다운로드 함수 ---
-@st.cache_resource
-def get_korean_font():
-    font_path = "malgun.ttf"
-    if not os.path.exists(font_path):
-        url = "https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf"
-        urllib.request.urlretrieve(url, font_path)
-    return font_path
 
 # --- 대본 텍스트 파싱 함수 ---
 def parse_script_text(text):
@@ -34,41 +23,40 @@ def parse_script_bytes(txt_bytes):
         text = txt_bytes.decode('cp949')
     return parse_script_text(text)
 
-# --- 메인 PDF 처리 함수 (오전 버전의 완벽한 1:1 매칭 구조 복원) ---
+# --- 메인 PDF 처리 함수 (족보 페이지 백지화 현상 완벽 해결) ---
 def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
     CM_TO_PT = 28.3465
     MARGIN_PT = 8.0 * CM_TO_PT  # 오른쪽 여백 8cm
     
-    font_path = get_korean_font()
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     out_doc = fitz.open()
     total_pages = len(doc)
     
     for pno in range(total_pages):
         page = doc[pno]
-        orig_rect = page.rect
-        orig_width, orig_height = orig_rect.width, orig_rect.height
+        rect = page.rect  # 페이지별 고유 영역 (CropBox/MediaBox 오프셋 포함)
+        w = rect.width
+        h = rect.height
         
-        FINAL_WIDTH = orig_width + MARGIN_PT
-        FINAL_HEIGHT = orig_height
+        FINAL_WIDTH = w + MARGIN_PT
+        FINAL_HEIGHT = h
         
-        # 1. 원본 페이지별로 딱 1장씩만 정확히 생성 (족보 및 전체 페이지 밀림 원천 차단)
+        # 1. 새 페이지 생성 및 흰색 배경 채우기
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         out_page.draw_rect(out_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
         
-        source_rect = fitz.Rect(0, 0, orig_width, orig_height)
-        out_page.show_pdf_page(source_rect, doc, pno)
+        # 2. 💡 핵심 수정: 좌표 오프셋이 있는 족보 페이지도 잘리지 않게 clip=rect로 정확히 잡아끌어오기
+        target_rect = fitz.Rect(0, 0, w, h)
+        out_page.show_pdf_page(target_rect, doc, pno, clip=rect)
         
         current_page_num = pno + 1
         script_text = script_dict.get(current_page_num, "").strip()
         
-        # 2. 대본이 있는 경우 우측 여백에 텍스트 삽입 (길이에 따라 폰트 크기 자동 조절)
+        # 3. 대본이 있는 경우 우측 8cm 여백에 텍스트 삽입
         if script_text:
-            out_page.insert_font(fontname="malgun", fontfile=font_path)
+            text_rect = fitz.Rect(w + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
             
-            text_rect = fitz.Rect(orig_width + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
-            
-            # 글자 수 길이에 따라 폰트 사이즈를 동적으로 조절하여 한 페이지에 싹 다 들어가게 처리
+            # 글자 수에 따른 폰트 크기 동적 조절
             text_len = len(script_text)
             if text_len > 1500:
                 font_size = 6.0
@@ -79,13 +67,13 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
             elif text_len > 400:
                 font_size = 9.0
             else:
-                font_size = 10.0
+                font_size = 9.5
             
             out_page.insert_textbox(
                 text_rect, 
                 script_text, 
                 fontsize=font_size, 
-                fontname="malgun", 
+                fontname="helv", 
                 align=fitz.TEXT_ALIGN_LEFT
             )
         
