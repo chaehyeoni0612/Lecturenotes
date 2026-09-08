@@ -7,6 +7,10 @@ import re
 import os
 import urllib.request
 
+FONT_NAME = "kfont"
+LINE_RATIO = 1.32                   # 줄간격 배수
+
+
 # --- 한글 폰트 자동 다운로드 ---
 @st.cache_resource
 def get_korean_font():
@@ -17,7 +21,7 @@ def get_korean_font():
     return font_path
 
 
-# --- 대본 텍스트 파싱 ---
+# --- 대본 파싱 ---
 def parse_script_text(text):
     splits = re.split(r'\[(\d+)\s*페이지\]', text)
     script_dict = {}
@@ -40,30 +44,82 @@ def parse_script_bytes(txt_bytes):
     return parse_script_text(text)
 
 
-# --- 여백 안에 대본 넣기 (넘치면 자동으로 글씨 줄임) ---
-def fit_textbox(page, rect, text, fontname, start_size=10.0, min_size=4.5):
-    size = start_size
-    while size >= min_size:
-        rc = page.insert_textbox(
-            rect, text, fontsize=size, fontname=fontname,
-            align=fitz.TEXT_ALIGN_LEFT, lineheight=1.25
-        )
-        if rc >= 0:          # 0 이상이면 다 들어감
-            return size
-        size -= 0.5
-    # 최소 크기로 한 번 더 (잘려도 넣음)
-    page.insert_textbox(rect, text, fontsize=min_size, fontname=fontname,
-                        align=fitz.TEXT_ALIGN_LEFT, lineheight=1.25)
-    return min_size
+# --- 텍스트를 문단/단어 토큰으로 분해 ---
+def tokenize(text):
+    return [para.split() for para in text.split("\n")]
+
+
+# --- 지정한 사각형에 들어갈 만큼만 그리고, 남은 위치를 반환 ---
+def fill_box(page, rect, tokens, state, font, size):
+    """state = [para_idx, word_idx]. 반환: 소비 후 state, 그린 줄 수"""
+    lh = size * LINE_RATIO
+    max_lines = int(rect.height // lh)
+    if max_lines <= 0:
+        return state, 0
+
+    pi, wi = state
+    width = rect.width
+    lines = []
+
+    while pi < len(tokens) and len(lines) < max_lines:
+        words = tokens[pi]
+        if not words:                       # 빈 줄(문단 구분)
+            lines.append("")
+            pi += 1
+            wi = 0
+            continue
+
+        cur = ""
+        while wi < len(words):
+            w = words[wi]
+            trial = w if not cur else cur + " " + w
+            if font.text_length(trial, size) <= width:
+                cur = trial
+                wi += 1
+            else:
+                if not cur:                 # 한 단어가 통째로 너무 길면 글자 단위로 자름
+                    k = 1
+                    while k <= len(w) and font.text_length(w[:k], size) <= width:
+                        k += 1
+                    k = max(1, k - 1)
+                    cur = w[:k]
+                    words[wi] = w[k:]       # 나머지는 다음 줄로
+                break
+
+        lines.append(cur)
+        if wi >= len(words):
+            pi += 1
+            wi = 0
+
+    y = rect.y0 + size
+    for ln in lines:
+        if ln:
+            page.insert_text(fitz.Point(rect.x0, y), ln,
+                             fontsize=size, fontname=FONT_NAME)
+        y += lh
+
+    return [pi, wi], len(lines)
+
+
+def is_done(tokens, state):
+    pi, wi = state
+    if pi >= len(tokens):
+        return True
+    if pi == len(tokens) - 1 and wi >= len(tokens[pi]):
+        return True
+    return False
 
 
 # --- 메인 PDF 처리 ---
 def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text,
-                            margin_cm=8.0):
+                            margin_cm=8.0, font_size=9.5, max_extra_pages=12):
     CM_TO_PT = 28.3465
     MARGIN_PT = margin_cm * CM_TO_PT
+    PAD = 12
 
     font_path = get_korean_font()
+    measure_font = fitz.Font(fontfile=font_path)
+
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     out_doc = fitz.open()
     total_pages = len(doc)
@@ -71,38 +127,59 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
     for pno in range(total_pages):
         page = doc[pno]
 
-        # ★ 핵심 수정 ★
-        # /Rotate 값을 먼저 0으로 없애고(= 원본 좌표계로 되돌리고),
-        # 그 회전값을 show_pdf_page에 '직접' 한 번만 적용한다.
-        # (PyMuPDF 버전에 따라 show_pdf_page가 /Rotate를 자동 반영하기도 하고
-        #  안 하기도 해서, 그대로 두면 회전이 두 번 먹혀 180도 뒤집힘)
+        # 회전 중복 적용 방지: /Rotate 를 지우고 show_pdf_page 에서 한 번만 적용
         rot = page.rotation
         page.set_rotation(0)
         raw = page.rect
-
         if rot in (90, 270):
-            w, h = raw.height, raw.width      # 화면에 보이는 가로/세로
+            w, h = raw.height, raw.width
         else:
             w, h = raw.width, raw.height
 
-        FINAL_WIDTH = w + MARGIN_PT
-        FINAL_HEIGHT = h
+        FINAL_W = w + MARGIN_PT
+        FINAL_H = h
 
-        out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
-        out_page.draw_rect(out_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
-
-        # 슬라이드를 왼쪽에 정방향으로 배치
-        out_page.show_pdf_page(fitz.Rect(0, 0, w, h), doc, pno, rotate=rot)
-
-        # 슬라이드와 여백 경계선 (필요 없으면 이 줄 삭제)
-        out_page.draw_line(fitz.Point(w, 0), fitz.Point(w, h),
-                           color=(0.8, 0.8, 0.8), width=0.5)
+        # ---------- 기본 페이지: 슬라이드 원본 크기 + 우측 여백 ----------
+        p1 = out_doc.new_page(width=FINAL_W, height=FINAL_H)
+        p1.draw_rect(p1.rect, color=(1, 1, 1), fill=(1, 1, 1))
+        p1.show_pdf_page(fitz.Rect(0, 0, w, h), doc, pno, rotate=rot)
+        p1.draw_line(fitz.Point(w, 0), fitz.Point(w, h),
+                     color=(0.8, 0.8, 0.8), width=0.5)
 
         script_text = script_dict.get(pno + 1, "").strip()
         if script_text:
-            out_page.insert_font(fontname="kfont", fontfile=font_path)
-            text_rect = fitz.Rect(w + 12, 15, FINAL_WIDTH - 12, FINAL_HEIGHT - 15)
-            fit_textbox(out_page, text_rect, script_text, "kfont")
+            p1.insert_font(fontname=FONT_NAME, fontfile=font_path)
+            tokens = tokenize(script_text)
+            state = [0, 0]
+            box = fitz.Rect(w + PAD, 15, FINAL_W - PAD, FINAL_H - 15)
+            state, _ = fill_box(p1, box, tokens, state, measure_font, font_size)
+
+            # ---------- 넘치면: 1/4 축소 슬라이드 + ㄱ자 영역에 이어쓰기 ----------
+            extra = 0
+            while not is_done(tokens, state) and extra < max_extra_pages:
+                pe = out_doc.new_page(width=FINAL_W, height=FINAL_H)
+                pe.draw_rect(pe.rect, color=(1, 1, 1), fill=(1, 1, 1))
+                pe.insert_font(fontname=FONT_NAME, fontfile=font_path)
+
+                mw, mh = w / 2, h / 2
+                pe.show_pdf_page(fitz.Rect(0, 0, mw, mh), doc, pno, rotate=rot)
+                pe.draw_rect(fitz.Rect(0, 0, mw, mh),
+                             color=(0.8, 0.8, 0.8), width=0.5)
+
+                before = list(state)
+
+                # ① 축소 슬라이드 오른쪽
+                box_a = fitz.Rect(mw + PAD, 15, FINAL_W - PAD, mh - 5)
+                state, _ = fill_box(pe, box_a, tokens, state, measure_font, font_size)
+
+                # ② 그 아래 전체 폭
+                if not is_done(tokens, state):
+                    box_b = fitz.Rect(PAD, mh + 10, FINAL_W - PAD, FINAL_H - 15)
+                    state, _ = fill_box(pe, box_b, tokens, state, measure_font, font_size)
+
+                if state == before:          # 한 줄도 못 넣었으면 무한루프 방지
+                    break
+                extra += 1
 
         progress_bar.progress((pno + 1) / total_pages)
         status_text.caption(f"PDF 변환 중... 📝 ({pno + 1} / {total_pages} 페이지)")
@@ -117,7 +194,8 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
 st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="centered")
 
 st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
-st.markdown("PDF를 업로드하고 대본을 입력하면, 각 슬라이드 우측에 여백과 대본이 생성됩니다.")
+st.markdown("슬라이드 우측에 여백을 만들고 대본을 넣습니다. 대본이 길면 글씨를 줄이지 않고 "
+            "**축소 슬라이드가 붙은 이어쓰기 페이지**를 추가합니다.")
 st.write("---")
 
 st.subheader("1️⃣ PDF 파일 업로드")
@@ -136,7 +214,12 @@ with tab1:
 with tab2:
     uploaded_txt = st.file_uploader("또는 TXT 대본 파일을 업로드하세요", type=["txt"])
 
-margin_cm = st.slider("오른쪽 여백 크기 (cm)", 4.0, 12.0, 8.0, 0.5)
+st.subheader("3️⃣ 설정")
+col1, col2 = st.columns(2)
+with col1:
+    margin_cm = st.slider("오른쪽 여백 (cm)", 4.0, 12.0, 8.0, 0.5)
+with col2:
+    font_size = st.slider("대본 글자 크기 (pt)", 6.0, 14.0, 9.5, 0.5)
 
 if uploaded_pdf is not None:
     st.write("---")
@@ -151,7 +234,8 @@ if uploaded_pdf is not None:
                 script_dict = parse_script_text(pasted_text)
 
             output_bytes = process_pdf_with_script(
-                uploaded_pdf.read(), script_dict, progress_bar, status_text, margin_cm
+                uploaded_pdf.read(), script_dict, progress_bar, status_text,
+                margin_cm, font_size
             )
 
             status_text.text("🎉 모든 작업 완료!")
