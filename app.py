@@ -34,7 +34,7 @@ def parse_script_bytes(txt_bytes):
         text = txt_bytes.decode('cp949')
     return parse_script_text(text)
 
-# --- 메인 PDF 처리 함수 (회전 각도 및 가로/세로 좌표 완벽 보정) ---
+# --- 메인 PDF 처리 함수 (회전된 슬라이드 정방향 고정 및 우측 여백 생성) ---
 def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
     CM_TO_PT = 28.3465
     MARGIN_PT = 8.0 * CM_TO_PT  # 오른쪽 여백 8cm
@@ -47,26 +47,26 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
     for pno in range(total_pages):
         page = doc[pno]
         rect = page.rect
-        rotation = page.rotation  # PDF 내부 회전 각도 확인 (0, 90, 180, 270)
+        rotation = page.rotation
         
-        # 회전되어 있는 경우 실제 보이는 가로/세로 폭을 정확히 교정
+        # 💡 핵심 해결: 슬라이드가 누워있든(90, 270도) 서 있든, 사람이 보는 실제 가로/세로 폭을 정확히 계산
         if rotation in [90, 270]:
-            orig_width = rect.height
-            orig_height = rect.width
+            w = rect.height
+            h = rect.width
         else:
-            orig_width = rect.width
-            orig_height = rect.height
+            w = rect.width
+            h = rect.height
         
-        FINAL_WIDTH = orig_width + MARGIN_PT
-        FINAL_HEIGHT = orig_height
+        FINAL_WIDTH = w + MARGIN_PT
+        FINAL_HEIGHT = h
         
-        # 1. 교정된 정방향 규격으로 새 페이지 생성 및 백색 배경 채우기
+        # 1. 정방향 규격으로 새 페이지 생성 및 백색 배경 채우기
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         out_page.draw_rect(out_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
         
-        # 2. 원본 슬라이드를 회전각 무시하고 항상 바른 방향(왼쪽)에 예쁘게 안착시키기
-        source_rect = fitz.Rect(0, 0, orig_width, orig_height)
-        out_page.show_pdf_page(source_rect, doc, pno)
+        # 2. 눕거나 찌그러진 원본 슬라이드를 회전 상태를 완벽히 반영하여 정방향(왼쪽)에 안착
+        target_rect = fitz.Rect(0, 0, w, h)
+        out_page.show_pdf_page(target_rect, doc, pno, rotate=int(rotation))
         
         current_page_num = pno + 1
         script_text = script_dict.get(current_page_num, "").strip()
@@ -75,7 +75,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         if script_text:
             out_page.insert_font(fontname="malgun", fontfile=font_path)
             
-            text_rect = fitz.Rect(orig_width + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
+            text_rect = fitz.Rect(w + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
             
             text_len = len(script_text)
             if text_len > 1500:
