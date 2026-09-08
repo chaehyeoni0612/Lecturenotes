@@ -40,29 +40,31 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
     total_pages = len(doc)
     
     for pno in range(total_pages):
-        # 1. 원본 페이지 형태를 100% 그대로 복사 (족보 페이지 증발 원천 차단)
-        out_doc.insert_pdf(doc, from_page=pno, to_page=pno)
-        out_page = out_doc[-1]
+        page = doc[pno]
+        orig_rect = page.rect
+        orig_width, orig_height = orig_rect.width, orig_rect.height
         
-        # 2. 복사된 페이지의 캔버스(배경)를 우측으로 8cm 강제 연장
-        orig_rect = out_page.rect
-        new_rect = fitz.Rect(orig_rect.x0, orig_rect.y0, orig_rect.x1 + MARGIN_PT, orig_rect.y1)
+        # 1. 각 페이지 고유의 가로/세로 크기에 맞춰 우측만 딱 8cm 늘어난 새 페이지 생성 (에러 원천 차단)
+        FINAL_WIDTH = orig_width + MARGIN_PT
+        FINAL_HEIGHT = orig_height
         
-        out_page.set_mediabox(new_rect)
-        out_page.set_cropbox(new_rect)
+        out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         
-        # 새로 생긴 우측 여백을 하얀색으로 칠하기 (투명 배경 PDF 방지)
-        margin_rect = fitz.Rect(orig_rect.x1, orig_rect.y0, orig_rect.x1 + MARGIN_PT, orig_rect.y1)
-        out_page.draw_rect(margin_rect, color=(1,1,1), fill=(1,1,1))
+        # 배경을 하얀색으로 채우기
+        out_page.draw_rect(out_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
+        
+        # 원본 페이지를 왼쪽 자리에 그대로 그림
+        source_rect = fitz.Rect(0, 0, orig_width, orig_height)
+        out_page.show_pdf_page(source_rect, doc, pno)
         
         current_page_num = pno + 1
         script_text = script_dict.get(current_page_num, "").strip()
         
-        # --- [3단계] 대본이 있는 페이지에만 텍스트 삽입 및 동적 페이지 추가 ---
+        # --- [2단계] 대본이 있는 페이지에만 텍스트 삽입 및 동적 페이지 추가 ---
         if script_text:
             out_page.insert_font(fontname="malgun", fontfile=font_path)
             
-            is_landscape = orig_rect.width > orig_rect.height
+            is_landscape = orig_width > orig_height
             max_main_chars = 950 if is_landscape else 1150
             max_extra_chars = 1600 if is_landscape else 1800 
             
@@ -108,8 +110,8 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                 chunks.append(current_chunk.strip())
             
             if chunks:
-                # 메인 페이지 원래 여백 위치에 텍스트 삽입
-                text_rect = fitz.Rect(orig_rect.x1 + 10, orig_rect.y0 + 15, orig_rect.x1 + MARGIN_PT - 10, orig_rect.y1 - 15)
+                # 메인 페이지 우측 여백에 첫 번째 조각 삽입
+                text_rect = fitz.Rect(orig_width + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
                 out_page.insert_textbox(
                     text_rect, 
                     chunks[0], 
@@ -120,20 +122,20 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                 
                 # 글자가 넘치면 뒷페이지 무한 동적 생성 (1/4 미니 슬라이드 포함)
                 for i in range(1, len(chunks)):
-                    extra_page = out_doc.new_page(width=new_rect.width, height=new_rect.height)
-                    extra_page.draw_rect(extra_page.rect, color=(1,1,1), fill=(1,1,1))
+                    extra_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
+                    extra_page.draw_rect(extra_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
                     extra_page.insert_font(fontname="malgun", fontfile=font_path)
                     
-                    mini_w = orig_rect.width * 0.5
-                    mini_h = orig_rect.height * 0.5
+                    mini_w = orig_width * 0.5
+                    mini_h = orig_height * 0.5
                     mini_rect = fitz.Rect(20, 20, 20 + mini_w, 20 + mini_h)
                     extra_page.show_pdf_page(mini_rect, doc, pno)
                     
                     extra_text_rect = fitz.Rect(
                         20 + mini_w + 15,  
                         20,                
-                        new_rect.width - 15,  
-                        new_rect.height - 20  
+                        FINAL_WIDTH - 15,  
+                        FINAL_HEIGHT - 20  
                     )
                     
                     extra_page.insert_textbox(
