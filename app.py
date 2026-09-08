@@ -13,18 +13,14 @@ def get_korean_font():
         urllib.request.urlretrieve(url, font_path)
     return font_path
 
-# --- 대본 텍스트 파싱 함수 (태그 없는 족보/추가 텍스트 누락 방지 보완) ---
+# --- 대본 텍스트 파싱 함수 ---
 def parse_script_text(text):
-    # [숫자페이지] 기준으로 텍스트를 안전하게 쪼개는 로직
     splits = re.split(r'\[(\d+)페이지\]', text)
     script_dict = {}
-    
-    # splits[0]은 첫 태그 앞의 잔여 텍스트이므로 무시하고, (번호, 내용) 쌍으로 처리
     for i in range(1, len(splits), 2):
         if i + 1 < len(splits):
             page_num = int(splits[i])
             content = splits[i+1].strip()
-            # 만약 같은 페이지 번호가 여러 개면 내용 합치기
             if page_num in script_dict:
                 script_dict[page_num] += "\n" + content
             else:
@@ -38,7 +34,7 @@ def parse_script_bytes(txt_bytes):
         text = txt_bytes.decode('cp949')
     return parse_script_text(text)
 
-# --- 메인 PDF 처리 함수 ---
+# --- 메인 PDF 처리 함수 (오전 버전의 완벽한 1:1 매칭 구조 복원) ---
 def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_text):
     CM_TO_PT = 28.3465
     MARGIN_PT = 8.0 * CM_TO_PT  # 오른쪽 여백 8cm
@@ -56,6 +52,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         FINAL_WIDTH = orig_width + MARGIN_PT
         FINAL_HEIGHT = orig_height
         
+        # 1. 원본 페이지별로 딱 1장씩만 정확히 생성 (족보 및 전체 페이지 밀림 원천 차단)
         out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
         out_page.draw_rect(out_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
         
@@ -65,92 +62,36 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         current_page_num = pno + 1
         script_text = script_dict.get(current_page_num, "").strip()
         
+        # 2. 대본이 있는 경우 우측 여백에 텍스트 삽입 (길이에 따라 폰트 크기 자동 조절)
         if script_text:
             out_page.insert_font(fontname="malgun", fontfile=font_path)
             
-            is_landscape = orig_width > orig_height
-            max_main_chars = 950 if is_landscape else 1150
-            max_extra_chars = 1600 if is_landscape else 1800 
+            text_rect = fitz.Rect(orig_width + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
             
-            max_main_lines = 38 if is_landscape else 48
-            max_extra_lines = 45 if is_landscape else 55
+            # 글자 수 길이에 따라 폰트 사이즈를 동적으로 조절하여 한 페이지에 싹 다 들어가게 처리
+            text_len = len(script_text)
+            if text_len > 1500:
+                font_size = 6.0
+            elif text_len > 1000:
+                font_size = 7.0
+            elif text_len > 600:
+                font_size = 8.0
+            elif text_len > 400:
+                font_size = 9.0
+            else:
+                font_size = 10.0
             
-            chunks = []
-            current_chunk = ""
-            current_chars = 0
-            current_lines = 0
-            
-            for line in script_text.split('\n'):
-                limit_chars = max_main_chars if len(chunks) == 0 else max_extra_chars
-                limit_lines = max_main_lines if len(chunks) == 0 else max_extra_lines
-                
-                if current_lines >= limit_lines and current_chunk.strip():
-                    chunks.append(current_chunk.strip())
-                    current_chunk = ""
-                    current_chars = 0
-                    current_lines = 0
-                    limit_chars = max_extra_chars
-                
-                if current_chars + len(line) > limit_chars:
-                    for word in line.split(' '):
-                        if current_chars + len(word) > limit_chars and current_chunk.strip():
-                            chunks.append(current_chunk.strip())
-                            current_chunk = ""
-                            current_chars = 0
-                            current_lines = 0
-                            limit_chars = max_extra_chars
-                            
-                        current_chunk += word + " "
-                        current_chars += len(word) + 1
-                    
-                    current_chunk += "\n"
-                    current_lines += 1
-                else:
-                    current_chunk += line + "\n"
-                    current_chars += len(line) + 1
-                    current_lines += 1
-            
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
-            
-            if chunks:
-                text_rect = fitz.Rect(orig_width + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
-                out_page.insert_textbox(
-                    text_rect, 
-                    chunks[0], 
-                    fontsize=10.0, 
-                    fontname="malgun", 
-                    align=fitz.TEXT_ALIGN_LEFT
-                )
-                
-                for i in range(1, len(chunks)):
-                    extra_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
-                    extra_page.draw_rect(extra_page.rect, color=(1, 1, 1), fill=(1, 1, 1))
-                    extra_page.insert_font(fontname="malgun", fontfile=font_path)
-                    
-                    mini_w = orig_width * 0.5
-                    mini_h = orig_height * 0.5
-                    mini_rect = fitz.Rect(20, 20, 20 + mini_w, 20 + mini_h)
-                    extra_page.show_pdf_page(mini_rect, doc, pno)
-                    
-                    extra_text_rect = fitz.Rect(
-                        20 + mini_w + 15,  
-                        20,                
-                        FINAL_WIDTH - 15,  
-                        FINAL_HEIGHT - 20  
-                    )
-                    
-                    extra_page.insert_textbox(
-                        extra_text_rect, 
-                        chunks[i], 
-                        fontsize=10.0, 
-                        fontname="malgun", 
-                        align=fitz.TEXT_ALIGN_LEFT
-                    )
+            out_page.insert_textbox(
+                text_rect, 
+                script_text, 
+                fontsize=font_size, 
+                fontname="malgun", 
+                align=fitz.TEXT_ALIGN_LEFT
+            )
         
         progress = (pno + 1) / total_pages
         progress_bar.progress(progress)
-        status_text.caption(f"대본 매칭 및 동적 페이지 생성 중... 📝 ({pno + 1} / {total_pages} 슬라이드 완료)")
+        status_text.caption(f"PDF 변환 중... 📝 ({pno + 1} / {total_pages} 페이지 완료)")
         
     out_bytes = out_doc.write()
     doc.close()
@@ -160,8 +101,8 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
 # --- 🎨 Streamlit UI ---
 st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="centered")
 
-st.title("📘 PDF 여백 생성 & 강의 대본 매칭기 (무한 확장형)")
-st.markdown("PDF를 업로드하고 대본을 입력하면, 긴 대본은 자동으로 1/4 슬라이드와 함께 뒷페이지로 연장됩니다.")
+st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
+st.markdown("PDF를 업로드하고 대본을 입력하면, 각 슬라이드 우측에 8cm 여백과 대본이 생성됩니다.")
 st.write("---")
 
 st.subheader("1️⃣ PDF 파일 업로드")
