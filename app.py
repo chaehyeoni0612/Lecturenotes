@@ -40,73 +40,76 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
     total_pages = len(doc)
     
     for pno in range(total_pages):
-        page = doc[pno]
-        rect = page.rect
-        orig_width, orig_height = rect.width, rect.height
+        # 1. 원본 페이지 형태를 100% 그대로 복사 (족보 페이지 증발 원천 차단)
+        out_doc.insert_pdf(doc, from_page=pno, to_page=pno)
+        out_page = out_doc[-1]
         
-        # 1. 가로/세로 방향 감지
-        is_landscape = orig_width > orig_height
-        if is_landscape:
-            base_w = 29.7 * CM_TO_PT
-            base_h = 21.0 * CM_TO_PT
-        else:
-            base_w = 21.0 * CM_TO_PT
-            base_h = 29.7 * CM_TO_PT
-            
-        scale = min(base_w / orig_width, base_h / orig_height)
-        scaled_width, scaled_height = orig_width * scale, orig_height * scale
+        # 2. 복사된 페이지의 캔버스(배경)를 우측으로 8cm 강제 연장
+        orig_rect = out_page.rect
+        new_rect = fitz.Rect(orig_rect.x0, orig_rect.y0, orig_rect.x1 + MARGIN_PT, orig_rect.y1)
         
-        dx = (base_w - scaled_width) / 2
-        dy = (base_h - scaled_height) / 2
+        out_page.set_mediabox(new_rect)
+        out_page.set_cropbox(new_rect)
         
-        FINAL_WIDTH = base_w + MARGIN_PT
-        FINAL_HEIGHT = base_h
-        
-        # --- [1단계] 메인 슬라이드 페이지 생성 ---
-        target_rect = fitz.Rect(dx, dy, dx + scaled_width, dy + scaled_height)
-        out_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
-        out_page.show_pdf_page(target_rect, doc, pno)
+        # 새로 생긴 우측 여백을 하얀색으로 칠하기 (투명 배경 PDF 방지)
+        margin_rect = fitz.Rect(orig_rect.x1, orig_rect.y0, orig_rect.x1 + MARGIN_PT, orig_rect.y1)
+        out_page.draw_rect(margin_rect, color=(1,1,1), fill=(1,1,1))
         
         current_page_num = pno + 1
-        if current_page_num in script_dict:
-            script_text = script_dict[current_page_num]
+        script_text = script_dict.get(current_page_num, "").strip()
+        
+        # --- [3단계] 대본이 있는 페이지에만 텍스트 삽입 및 동적 페이지 추가 ---
+        if script_text:
+            out_page.insert_font(fontname="malgun", fontfile=font_path)
             
-            if script_text:
-                out_page.insert_font(fontname="malgun", fontfile=font_path)
+            is_landscape = orig_rect.width > orig_rect.height
+            max_main_chars = 950 if is_landscape else 1150
+            max_extra_chars = 1600 if is_landscape else 1800 
+            
+            max_main_lines = 38 if is_landscape else 48
+            max_extra_lines = 45 if is_landscape else 55
+            
+            chunks = []
+            current_chunk = ""
+            current_chars = 0
+            current_lines = 0
+            
+            for line in script_text.split('\n'):
+                limit_chars = max_main_chars if len(chunks) == 0 else max_extra_chars
+                limit_lines = max_main_lines if len(chunks) == 0 else max_extra_lines
                 
-                # --- 💡 바로 이 부분 수치를 중간으로 조정했습니다! ---
-                # 가로형(landscape)일 때와 세로형(portrait)일 때의 최대 글자 수 
-                max_main_chars = 900 if is_landscape else 1100
-                max_extra_chars = 1600 if is_landscape else 1800 
-                # ------------------------------------------------
-                
-                # 자체 텍스트 분할 알고리즘
-                chunks = []
-                current_chunk = ""
-                is_first = True
-                
-                for line in script_text.split('\n'):
-                    limit = max_main_chars if is_first else max_extra_chars
-                    
-                    if len(current_chunk) + len(line) + 1 > limit:
-                        # 띄어쓰기(단어) 단위로 쪼개기
-                        for word in line.split(' '):
-                            if len(current_chunk) + len(word) + 1 > limit:
-                                chunks.append(current_chunk.strip())
-                                is_first = False
-                                limit = max_extra_chars
-                                current_chunk = word + " "
-                            else:
-                                current_chunk += word + " "
-                        current_chunk += "\n"
-                    else:
-                        current_chunk += line + "\n"
-                
-                if current_chunk.strip():
+                if current_lines >= limit_lines and current_chunk.strip():
                     chunks.append(current_chunk.strip())
+                    current_chunk = ""
+                    current_chars = 0
+                    current_lines = 0
+                    limit_chars = max_extra_chars
                 
-                # 2. 메인 페이지 우측 여백에 첫 번째 조각(Chunk) 삽입
-                text_rect = fitz.Rect(base_w + 10, 15, FINAL_WIDTH - 10, FINAL_HEIGHT - 15)
+                if current_chars + len(line) > limit_chars:
+                    for word in line.split(' '):
+                        if current_chars + len(word) > limit_chars and current_chunk.strip():
+                            chunks.append(current_chunk.strip())
+                            current_chunk = ""
+                            current_chars = 0
+                            current_lines = 0
+                            limit_chars = max_extra_chars
+                            
+                        current_chunk += word + " "
+                        current_chars += len(word) + 1
+                    
+                    current_chunk += "\n"
+                    current_lines += 1
+                else:
+                    current_chunk += line + "\n"
+                    current_chars += len(line) + 1
+                    current_lines += 1
+            
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            
+            if chunks:
+                # 메인 페이지 원래 여백 위치에 텍스트 삽입
+                text_rect = fitz.Rect(orig_rect.x1 + 10, orig_rect.y0 + 15, orig_rect.x1 + MARGIN_PT - 10, orig_rect.y1 - 15)
                 out_page.insert_textbox(
                     text_rect, 
                     chunks[0], 
@@ -115,23 +118,22 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                     align=fitz.TEXT_ALIGN_LEFT
                 )
                 
-                # 3. 텍스트가 남았다면 필요한 만큼 무한대로 뒷페이지 생성
+                # 글자가 넘치면 뒷페이지 무한 동적 생성 (1/4 미니 슬라이드 포함)
                 for i in range(1, len(chunks)):
-                    extra_page = out_doc.new_page(width=FINAL_WIDTH, height=FINAL_HEIGHT)
+                    extra_page = out_doc.new_page(width=new_rect.width, height=new_rect.height)
+                    extra_page.draw_rect(extra_page.rect, color=(1,1,1), fill=(1,1,1))
                     extra_page.insert_font(fontname="malgun", fontfile=font_path)
                     
-                    # 새 페이지 좌측 상단에 원본 슬라이드 1/4 크기로 축소 삽입
-                    mini_w = scaled_width * 0.5
-                    mini_h = scaled_height * 0.5
+                    mini_w = orig_rect.width * 0.5
+                    mini_h = orig_rect.height * 0.5
                     mini_rect = fitz.Rect(20, 20, 20 + mini_w, 20 + mini_h)
                     extra_page.show_pdf_page(mini_rect, doc, pno)
                     
-                    # 텍스트 영역: 미니 슬라이드 오른쪽 빈 공간부터 전체 활용
                     extra_text_rect = fitz.Rect(
                         20 + mini_w + 15,  
                         20,                
-                        FINAL_WIDTH - 15,  
-                        FINAL_HEIGHT - 20  
+                        new_rect.width - 15,  
+                        new_rect.height - 20  
                     )
                     
                     extra_page.insert_textbox(
