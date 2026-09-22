@@ -13,7 +13,7 @@ CM_TO_PT = 28.3465
 A4_W, A4_H = 841.89, 595.28         # A4 가로 (pt) — 모든 슬라이드를 이 크기로 통일
 
 
-# --- 글씨체 목록 (모두 무료 OFL 폰트, jsDelivr에서 버전 고정 주소로 받음) ---
+# --- 글씨체 목록 (모두 무료 OFL 폰트, jsDelivr 버전 고정 주소) ---
 FONTS = {
     "Pretendard": (
         "Pretendard-Regular.ttf",
@@ -28,6 +28,8 @@ FONTS = {
         "https://cdn.jsdelivr.net/npm/@expo-google-fonts/ibm-plex-sans-kr@0.4.1/400Regular/IBMPlexSansKR_400Regular.ttf",
     ),
 }
+FALLBACK_LABEL = "Pretendard"       # 선택한 폰트에 없는 글자(ç, α 등)는 이 폰트로 찍음
+FB_NAME = "kfont_fb"
 
 
 def _is_valid_font(path):
@@ -38,7 +40,7 @@ def _is_valid_font(path):
         return False
 
 
-# --- 선택한 글씨체 자동 다운로드 (받은 파일이 깨졌으면 지우고 다시 받음) ---
+# --- 글씨체 자동 다운로드 (받은 파일이 깨졌으면 지우고 다시 받음) ---
 @st.cache_resource
 def get_korean_font(font_label="Pretendard"):
     file_name, url = FONTS[font_label]
@@ -51,6 +53,40 @@ def get_korean_font(font_label="Pretendard"):
         raise RuntimeError(f"'{font_label}' 글씨체를 받지 못했습니다. 잠시 후 다시 시도해 주세요.")
     os.replace(tmp, file_name)
     return file_name
+
+
+# --- 글자 폭 측정기 ---
+# 글자마다 (폭, 어느 폰트로 찍을지)를 한 번만 계산해 저장 → 속도 + 빠진 글자 대체
+class TextMeasurer:
+    def __init__(self, main_path, fb_path):
+        self.main = fitz.Font(fontfile=main_path)
+        self.fb = fitz.Font(fontfile=fb_path)
+        self.cache = {}
+
+    def info(self, ch):
+        v = self.cache.get(ch)
+        if v is None:
+            code = ord(ch)
+            if self.main.has_glyph(code) or not self.fb.has_glyph(code):
+                v = (self.main.glyph_advance(code), False)
+            else:
+                v = (self.fb.glyph_advance(code), True)
+            self.cache[ch] = v
+        return v
+
+    def width(self, text, size):
+        return sum(self.info(ch)[0] for ch in text) * size
+
+    def runs(self, text):
+        """같은 폰트로 찍을 글자끼리 묶어서 [(문자열, 대체폰트여부), ...] 반환"""
+        out = []
+        for ch in text:
+            use_fb = self.info(ch)[1]
+            if out and out[-1][1] == use_fb:
+                out[-1][0] += ch
+            else:
+                out.append([ch, use_fb])
+        return out
 
 
 # --- 대본 파싱 ---
@@ -102,18 +138,26 @@ def fill_box(page, rect, tokens, state, font, size):
             continue
 
         cur = ""
+        cur_w = 0.0
+        space_w = font.width(" ", size)
         while wi < len(words):
             w = words[wi]
-            trial = w if not cur else cur + " " + w
-            if font.text_length(trial, size) <= width:
-                cur = trial
+            w_w = font.width(w, size)
+            add_w = w_w if not cur else space_w + w_w
+            if cur_w + add_w <= width:
+                cur = w if not cur else cur + " " + w
+                cur_w += add_w
                 wi += 1
             else:
                 if not cur:                 # 한 단어가 통째로 너무 길면 글자 단위로 자름
-                    k = 1
-                    while k <= len(w) and font.text_length(w[:k], size) <= width:
+                    k, acc = 0, 0.0
+                    while k < len(w):
+                        cw = font.width(w[k], size)
+                        if acc + cw > width:
+                            break
+                        acc += cw
                         k += 1
-                    k = max(1, k - 1)
+                    k = max(1, k)
                     cur = w[:k]
                     words[wi] = w[k:]       # 나머지는 다음 줄로
                 break
@@ -126,8 +170,11 @@ def fill_box(page, rect, tokens, state, font, size):
     y = rect.y0 + size
     for ln in lines:
         if ln:
-            page.insert_text(fitz.Point(rect.x0, y), ln,
-                             fontsize=size, fontname=FONT_NAME)
+            x = rect.x0
+            for run, use_fb in font.runs(ln):
+                page.insert_text(fitz.Point(x, y), run, fontsize=size,
+                                 fontname=FB_NAME if use_fb else FONT_NAME)
+                x += font.width(run, size)
         y += lh
 
     return [pi, wi], len(lines)
@@ -170,8 +217,12 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         text_box = fitz.Rect(A4_W + PAD, 15, FINAL_W - PAD, FINAL_H - 15)
         divider_x = A4_W
 
+    progress_bar.progress(0, text="글씨체 준비 중... (0%)")
     font_path = get_korean_font(font_label)
-    measure_font = fitz.Font(fontfile=font_path)
+    fb_path = get_korean_font(FALLBACK_LABEL)
+    measure_font = TextMeasurer(font_path, fb_path)
+
+    progress_bar.progress(0, text="PDF 여는 중... (0%)")
 
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
     out_doc = fitz.open()
@@ -201,6 +252,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
         script_text = script_dict.get(pno + 1, "").strip()
         if script_text:
             p1.insert_font(fontname=FONT_NAME, fontfile=font_path)
+            p1.insert_font(fontname=FB_NAME, fontfile=fb_path)
             tokens = tokenize(script_text)
             state = [0, 0]
             state, _ = fill_box(p1, text_box, tokens, state, measure_font, font_size)
@@ -213,6 +265,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                 pe = out_doc.new_page(width=FINAL_W, height=FINAL_H)
                 pe.draw_rect(pe.rect, color=(1, 1, 1), fill=(1, 1, 1))
                 pe.insert_font(fontname=FONT_NAME, fontfile=font_path)
+                pe.insert_font(fontname=FB_NAME, fontfile=fb_path)
 
                 place_slide(pe, mini_box, doc, pno, rot, disp_w, disp_h)
                 pe.draw_rect(mini_box, color=(0.8, 0.8, 0.8), width=0.5)
@@ -232,11 +285,15 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                     break
                 extra += 1
 
-        progress_bar.progress((pno + 1) / total_pages)
-        status_text.caption(f"PDF 변환 중... 📝 ({pno + 1} / {total_pages} 페이지)")
+        # 페이지 작업을 전체의 95%로 보고, 나머지 5%는 저장 단계
+        pct = int((pno + 1) / total_pages * 95)
+        progress_bar.progress(pct / 100,
+                              text=f"PDF 변환 중... {pct}% ({pno + 1} / {total_pages} 페이지)")
 
+    progress_bar.progress(0.96, text="파일 저장 중... 96% (용량이 크면 조금 걸려요)")
     out_doc.subset_fonts()                   # 실제 쓴 글자만 남겨 용량 줄이기
     out_bytes = out_doc.write(garbage=3, deflate=True)
+    progress_bar.progress(1.0, text="완료! 100%")
     doc.close()
     out_doc.close()
     return out_bytes
@@ -268,7 +325,8 @@ with tab2:
 
 st.subheader("3️⃣ 설정")
 margin_side = st.radio("여백 위치", ["오른쪽", "왼쪽"], horizontal=True)
-font_label = st.selectbox("글씨체", list(FONTS.keys()))
+font_label = st.selectbox("글씨체", list(FONTS.keys()),
+                          help="선택한 글씨체에 없는 글자(ç, α 등)는 자동으로 Pretendard로 표시됩니다.")
 col1, col2 = st.columns(2)
 with col1:
     margin_cm = st.slider("여백 크기 (cm)", 4.0, 12.0, 8.0, 0.5)
@@ -284,7 +342,7 @@ if uploaded_pdf is not None:
 
     st.write("---")
     if st.button("✨ PDF 변환 및 대본 매칭 실행", type="primary", use_container_width=True):
-        progress_bar = st.progress(0)
+        progress_bar = st.progress(0, text="준비 중... 0%")
         status_text = st.empty()
         try:
             script_dict = {}
@@ -297,7 +355,7 @@ if uploaded_pdf is not None:
                 uploaded_pdf.getvalue(), script_dict, progress_bar, status_text,
                 margin_cm, font_size, margin_side, font_label
             )
-            status_text.text("🎉 모든 작업 완료!")
+            status_text.success("🎉 모든 작업 완료! 아래에서 파일 이름을 정하고 다운로드하세요.")
             st.balloons()
         except Exception as e:
             st.error(f"오류가 발생했습니다: {e}")
