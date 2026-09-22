@@ -334,10 +334,9 @@ with col2:
     font_size = st.slider("대본 글자 크기 (pt)", 6.0, 14.0, 9.5, 0.5)
 
 if uploaded_pdf is not None:
-    # 새 PDF를 올리면 이전 결과와 파일명 초기화
+    # 새 PDF를 올리면 이전 결과 초기화
     if st.session_state.get("src_name") != uploaded_pdf.name:
         st.session_state["src_name"] = uploaded_pdf.name
-        st.session_state["out_name"] = f"대본추가_{os.path.splitext(uploaded_pdf.name)[0]}"
         st.session_state.pop("output_bytes", None)
 
     st.write("---")
@@ -351,6 +350,8 @@ if uploaded_pdf is not None:
             elif pasted_text.strip():
                 script_dict = parse_script_text(pasted_text)
 
+            st.session_state.pop("output_bytes", None)
+            st.session_state["run_id"] = st.session_state.get("run_id", 0) + 1
             st.session_state["output_bytes"] = process_pdf_with_script(
                 uploaded_pdf.getvalue(), script_dict, progress_bar, status_text,
                 margin_cm, font_size, margin_side, font_label
@@ -363,7 +364,10 @@ if uploaded_pdf is not None:
     # 결과는 session_state에 저장 → 파일명을 고쳐도 결과가 사라지지 않음
     if "output_bytes" in st.session_state:
         st.subheader("4️⃣ 다운로드")
-        out_name = st.text_input("저장할 파일 이름", key="out_name").strip()
+        default_name = f"대본추가_{os.path.splitext(uploaded_pdf.name)[0]}.pdf"
+        # 변환할 때마다 새 입력칸 → 항상 '대본추가_원본이름.pdf'가 채워진 상태로 시작
+        out_name = st.text_input("저장할 파일 이름 (수정 가능)", value=default_name,
+                                 key=f"out_name_{st.session_state.get('run_id', 0)}").strip()
         out_name = re.sub(r'[\\/:*?"<>|]', "_", out_name) or "대본추가"
         if not out_name.lower().endswith(".pdf"):
             out_name += ".pdf"
