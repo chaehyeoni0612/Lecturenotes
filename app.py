@@ -300,7 +300,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
     return out_bytes
 
 
-# --- 구글 드라이브 업로드 (Apps Script가 업로드 주소만 발급 → 파일은 드라이브로 직접 조각 전송) ---
+# --- 구글 드라이브 (Apps Script: 폴더 목록 / 폴더 만들기 / 업로드 주소 발급) ---
 def get_drive_config():
     try:
         cfg = st.secrets["drive"]
@@ -309,22 +309,37 @@ def get_drive_config():
         return None
 
 
-def upload_to_drive(pdf_bytes, file_name, progress_bar, chunk_mb=8):
+def drive_call(payload, timeout=60):
     web_app_url, secret = get_drive_config()
-    total = len(pdf_bytes)
-
-    # ① Apps Script에 업로드 주소 요청
-    progress_bar.progress(0, text="드라이브 업로드 준비 중... 0%")
-    r = requests.post(web_app_url, json={"secret": secret, "name": file_name, "size": total},
-                      timeout=60)
+    r = requests.post(web_app_url, json={"secret": secret, **payload}, timeout=timeout)
     try:
         info = r.json()
     except ValueError:
         raise RuntimeError("Apps Script 응답을 읽지 못했습니다. 웹 앱 배포 시 "
-                           "'액세스 권한: 모든 사용자'로 했는지 확인해 주세요.")
+                           "'액세스 권한: 모든 사용자'로 했는지, 새 버전으로 배포했는지 확인해 주세요.")
     if not info.get("ok"):
         raise RuntimeError(info.get("error", "알 수 없는 오류"))
+    return info
+
+
+def list_drive_folders():
+    """반환: (최상위 폴더 {id,name}, 바로 아래 폴더 목록 [{id,name}, ...])"""
+    info = drive_call({"action": "list"})
+    return info["root"], info["folders"]
+
+
+def create_drive_folder(name):
+    return drive_call({"action": "mkdir", "name": name})
+
+
+def upload_to_drive(pdf_bytes, file_name, progress_bar, folder_id=None, chunk_mb=8):
+    total = len(pdf_bytes)
+
+    # ① Apps Script에 업로드 주소 요청
+    progress_bar.progress(0, text="드라이브 업로드 준비 중... 0%")
+    info = drive_call({"action": "upload", "name": file_name, "size": total, "folderId": folder_id})
     upload_url = info["uploadUrl"]
+    folder_name = info.get("folderName", "")
 
     # ② 파일을 조각내서 드라이브로 직접 전송 (조각 크기는 256KB의 배수여야 함)
     chunk = chunk_mb * 1024 * 1024
@@ -341,8 +356,7 @@ def upload_to_drive(pdf_bytes, file_name, progress_bar, chunk_mb=8):
 
         if resp is not None and resp.status_code in (200, 201):
             progress_bar.progress(1.0, text="드라이브 업로드 완료! 100%")
-            file_id = resp.json().get("id")
-            return f"https://drive.google.com/file/d/{file_id}/view", info.get("folderName", "")
+            return f"https://drive.google.com/file/d/{resp.json().get('id')}/view", folder_name
 
         if resp is not None and resp.status_code == 308:      # 이어서 보낼 것
             rng = resp.headers.get("Range")                    # 예: bytes=0-8388607
@@ -363,7 +377,7 @@ def upload_to_drive(pdf_bytes, file_name, progress_bar, chunk_mb=8):
                            allow_redirects=False, timeout=60)
         if chk.status_code in (200, 201):
             progress_bar.progress(1.0, text="드라이브 업로드 완료! 100%")
-            return f"https://drive.google.com/file/d/{chk.json().get('id')}/view", info.get("folderName", "")
+            return f"https://drive.google.com/file/d/{chk.json().get('id')}/view", folder_name
         rng = chk.headers.get("Range")
         start = int(rng.split("-")[1]) + 1 if rng else 0
 
@@ -452,15 +466,69 @@ if uploaded_pdf is not None:
         if get_drive_config() is None:
             st.caption("📤 구글 드라이브 업로드를 쓰려면 앱 설정(Secrets)에 [drive] 항목을 넣어주세요.")
         else:
-            up_key = f"drive_link_{st.session_state.get('run_id', 0)}_{out_name}"
-            if st.button("📤 구글 드라이브에 업로드", use_container_width=True):
-                up_bar = st.progress(0, text="드라이브 업로드 준비 중... 0%")
+            st.markdown("**📤 구글 드라이브에 저장**")
+
+            # 폴더 목록 불러오기 (한 번 불러오면 🔄 누르기 전까지 재사용)
+            if "drive_folders" not in st.session_state:
                 try:
-                    st.session_state[up_key] = upload_to_drive(
-                        st.session_state["output_bytes"], out_name, up_bar)
+                    with st.spinner("드라이브 폴더 목록 불러오는 중..."):
+                        st.session_state["drive_folders"] = list_drive_folders()
                 except Exception as e:
-                    st.error(f"드라이브 업로드 실패: {e}")
-            if up_key in st.session_state:
-                link, folder_name = st.session_state[up_key]
-                where = f"'{folder_name}' 폴더에 " if folder_name else ""
-                st.success(f"✅ {where}**{out_name}** 업로드 완료 → [드라이브에서 열기]({link})")
+                    st.error(f"폴더 목록을 불러오지 못했습니다: {e}")
+
+            if "drive_folders" in st.session_state:
+                root, children = st.session_state["drive_folders"]
+                labels = {root["id"]: f"{root['name']} (바로 여기에)"}
+                for f in children:
+                    labels[f["id"]] = f"{root['name']} / {f['name']}"
+                ids = list(labels.keys())
+
+                # 방금 만든 폴더 자동 선택 / 없어진 폴더면 최상위로
+                if "drive_pending_sel" in st.session_state:
+                    st.session_state["drive_folder_sel"] = st.session_state.pop("drive_pending_sel")
+                if st.session_state.get("drive_folder_sel") not in ids:
+                    st.session_state["drive_folder_sel"] = root["id"]
+
+                c1, c2 = st.columns([5, 1])
+                with c1:
+                    folder_id = st.selectbox("📁 저장할 폴더", ids, key="drive_folder_sel",
+                                             format_func=lambda i: labels[i])
+                with c2:
+                    st.write("")
+                    st.write("")
+                    if st.button("🔄", help="드라이브에서 폴더 목록 다시 불러오기",
+                                 use_container_width=True):
+                        st.session_state.pop("drive_folders", None)
+                        st.rerun()
+
+                with st.expander(f"➕ 새 폴더 만들기 ({root['name']} 안에)"):
+                    nk = st.session_state.get("drive_new_folder_n", 0)
+                    new_name = st.text_input("새 폴더 이름", key=f"drive_new_folder_{nk}",
+                                             placeholder="예: 소화기학").strip()
+                    if st.button("폴더 만들기", disabled=not new_name):
+                        try:
+                            res = create_drive_folder(new_name)
+                            st.session_state["drive_folders"] = list_drive_folders()
+                            st.session_state["drive_pending_sel"] = res["folder"]["id"]
+                            st.session_state["drive_new_folder_n"] = nk + 1
+                            st.session_state["drive_msg"] = (
+                                f"이미 있는 '{new_name}' 폴더를 선택했습니다." if res.get("existed")
+                                else f"'{new_name}' 폴더를 만들고 선택했습니다.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"폴더를 만들지 못했습니다: {e}")
+                if "drive_msg" in st.session_state:
+                    st.info(st.session_state.pop("drive_msg"))
+
+                up_key = f"drive_link_{st.session_state.get('run_id', 0)}_{folder_id}_{out_name}"
+                if st.button(f"📤 '{labels[folder_id]}'에 업로드", use_container_width=True):
+                    up_bar = st.progress(0, text="드라이브 업로드 준비 중... 0%")
+                    try:
+                        st.session_state[up_key] = upload_to_drive(
+                            st.session_state["output_bytes"], out_name, up_bar, folder_id)
+                    except Exception as e:
+                        st.error(f"드라이브 업로드 실패: {e}")
+                if up_key in st.session_state:
+                    link, folder_name = st.session_state[up_key]
+                    where = f"'{folder_name}' 폴더에 " if folder_name else ""
+                    st.success(f"✅ {where}**{out_name}** 업로드 완료 → [드라이브에서 열기]({link})")
