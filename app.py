@@ -6,6 +6,7 @@ except ImportError:
 import re
 import os
 import urllib.request
+import requests
 
 FONT_NAME = "kfont"
 LINE_RATIO = 1.32                   # 줄간격 배수
@@ -299,6 +300,74 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
     return out_bytes
 
 
+# --- 구글 드라이브 업로드 (Apps Script가 업로드 주소만 발급 → 파일은 드라이브로 직접 조각 전송) ---
+def get_drive_config():
+    try:
+        cfg = st.secrets["drive"]
+        return cfg["web_app_url"], cfg["secret"]
+    except Exception:
+        return None
+
+
+def upload_to_drive(pdf_bytes, file_name, progress_bar, chunk_mb=8):
+    web_app_url, secret = get_drive_config()
+    total = len(pdf_bytes)
+
+    # ① Apps Script에 업로드 주소 요청
+    progress_bar.progress(0, text="드라이브 업로드 준비 중... 0%")
+    r = requests.post(web_app_url, json={"secret": secret, "name": file_name, "size": total},
+                      timeout=60)
+    try:
+        info = r.json()
+    except ValueError:
+        raise RuntimeError("Apps Script 응답을 읽지 못했습니다. 웹 앱 배포 시 "
+                           "'액세스 권한: 모든 사용자'로 했는지 확인해 주세요.")
+    if not info.get("ok"):
+        raise RuntimeError(info.get("error", "알 수 없는 오류"))
+    upload_url = info["uploadUrl"]
+
+    # ② 파일을 조각내서 드라이브로 직접 전송 (조각 크기는 256KB의 배수여야 함)
+    chunk = chunk_mb * 1024 * 1024
+    start, retries = 0, 0
+    while True:
+        end = min(start + chunk, total) - 1
+        try:
+            resp = requests.put(
+                upload_url, data=pdf_bytes[start:end + 1],
+                headers={"Content-Range": f"bytes {start}-{end}/{total}"},
+                allow_redirects=False, timeout=300)
+        except requests.RequestException:
+            resp = None
+
+        if resp is not None and resp.status_code in (200, 201):
+            progress_bar.progress(1.0, text="드라이브 업로드 완료! 100%")
+            file_id = resp.json().get("id")
+            return f"https://drive.google.com/file/d/{file_id}/view", info.get("folderName", "")
+
+        if resp is not None and resp.status_code == 308:      # 이어서 보낼 것
+            rng = resp.headers.get("Range")                    # 예: bytes=0-8388607
+            start = int(rng.split("-")[1]) + 1 if rng else 0
+            retries = 0
+            pct = int(start / total * 100)
+            progress_bar.progress(min(pct, 99) / 100,
+                                  text=f"드라이브 업로드 중... {pct}% "
+                                       f"({start / 1e6:.1f} / {total / 1e6:.1f} MB)")
+            continue
+
+        # 일시 오류(네트워크, 5xx) → 서버가 받은 위치를 확인하고 최대 3번 재시도
+        retries += 1
+        if retries > 3 or (resp is not None and resp.status_code < 500):
+            detail = f"({resp.status_code}) {resp.text[:200]}" if resp is not None else "네트워크 오류"
+            raise RuntimeError(f"업로드 실패 {detail}")
+        chk = requests.put(upload_url, headers={"Content-Range": f"bytes */{total}"},
+                           allow_redirects=False, timeout=60)
+        if chk.status_code in (200, 201):
+            progress_bar.progress(1.0, text="드라이브 업로드 완료! 100%")
+            return f"https://drive.google.com/file/d/{chk.json().get('id')}/view", info.get("folderName", "")
+        rng = chk.headers.get("Range")
+        start = int(rng.split("-")[1]) + 1 if rng else 0
+
+
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="centered")
 
@@ -378,3 +447,20 @@ if uploaded_pdf is not None:
             mime="application/pdf",
             use_container_width=True
         )
+
+        # --- 구글 드라이브 업로드 ---
+        if get_drive_config() is None:
+            st.caption("📤 구글 드라이브 업로드를 쓰려면 앱 설정(Secrets)에 [drive] 항목을 넣어주세요.")
+        else:
+            up_key = f"drive_link_{st.session_state.get('run_id', 0)}_{out_name}"
+            if st.button("📤 구글 드라이브에 업로드", use_container_width=True):
+                up_bar = st.progress(0, text="드라이브 업로드 준비 중... 0%")
+                try:
+                    st.session_state[up_key] = upload_to_drive(
+                        st.session_state["output_bytes"], out_name, up_bar)
+                except Exception as e:
+                    st.error(f"드라이브 업로드 실패: {e}")
+            if up_key in st.session_state:
+                link, folder_name = st.session_state[up_key]
+                where = f"'{folder_name}' 폴더에 " if folder_name else ""
+                st.success(f"✅ {where}**{out_name}** 업로드 완료 → [드라이브에서 열기]({link})")
