@@ -29,6 +29,11 @@ FONTS = {
         "https://cdn.jsdelivr.net/npm/@expo-google-fonts/ibm-plex-sans-kr@0.4.1/400Regular/IBMPlexSansKR_400Regular.ttf",
     ),
 }
+EMPH_RE = re.compile(r"\*\*(.+?)\*\*|==(.+?)==", re.S)   # **강조** 또는 ==강조==
+EMPH_COLOR = (0.80, 0.05, 0.05)     # 강조 글씨색 (빨강)
+EMPH_BG = (1.0, 0.93, 0.35)         # 형광펜색 (노랑)
+TEXT_COLOR = (0, 0, 0)
+
 FALLBACK_LABEL = "Pretendard"       # 선택한 폰트에 없는 글자(ç, α 등)는 이 폰트로 찍음
 FB_NAME = "kfont_fb"
 
@@ -113,9 +118,31 @@ def parse_script_bytes(txt_bytes):
     return parse_script_text(text)
 
 
-# --- 텍스트를 문단/단어 토큰으로 분해 ---
+# --- 텍스트를 문단/단어 토큰으로 분해 (**강조** 표시 인식) ---
 def tokenize(text):
-    return [para.split() for para in text.split("\n")]
+    paragraphs = []
+    for para in text.split("\n"):
+        # 글자마다 강조 여부를 매긴 뒤 공백으로 끊어 단어를 만든다
+        chars, pos = [], 0
+        for m in EMPH_RE.finditer(para):
+            chars += [(c, False) for c in para[pos:m.start()]]
+            chars += [(c, True) for c in (m.group(1) or m.group(2))]
+            pos = m.end()
+        chars += [(c, False) for c in para[pos:]]
+
+        words, cur, emph = [], "", False
+        for c, e in chars:
+            if c.isspace():
+                if cur:
+                    words.append([cur, emph])
+                    cur, emph = "", False
+            else:
+                cur += c
+                emph = emph or e          # 단어 일부만 강조돼도 그 단어 전체를 강조
+        if cur:
+            words.append([cur, emph])
+        paragraphs.append(words)
+    return paragraphs
 
 
 # --- 지정한 사각형에 들어갈 만큼만 그리고, 남은 위치를 반환 ---
@@ -138,15 +165,14 @@ def fill_box(page, rect, tokens, state, font, size):
             wi = 0
             continue
 
-        cur = ""
-        cur_w = 0.0
+        cur, cur_w = [], 0.0
         space_w = font.width(" ", size)
         while wi < len(words):
-            w = words[wi]
+            w, w_emph = words[wi]
             w_w = font.width(w, size)
             add_w = w_w if not cur else space_w + w_w
             if cur_w + add_w <= width:
-                cur = w if not cur else cur + " " + w
+                cur.append((w, w_emph))
                 cur_w += add_w
                 wi += 1
             else:
@@ -159,8 +185,8 @@ def fill_box(page, rect, tokens, state, font, size):
                         acc += cw
                         k += 1
                     k = max(1, k)
-                    cur = w[:k]
-                    words[wi] = w[k:]       # 나머지는 다음 줄로
+                    cur.append((w[:k], w_emph))
+                    words[wi] = [w[k:], w_emph]   # 나머지는 다음 줄로
                 break
 
         lines.append(cur)
@@ -171,11 +197,27 @@ def fill_box(page, rect, tokens, state, font, size):
     y = rect.y0 + size
     for ln in lines:
         if ln:
+            # 강조 여부가 같은 단어끼리 묶어서 (띄어쓰기 포함) 한 덩어리로 그림
+            groups = []
+            for w, e in ln:
+                if groups and groups[-1][1] == e:
+                    groups[-1][0] += " " + w
+                else:
+                    groups.append([w, e])
+
             x = rect.x0
-            for run, use_fb in font.runs(ln):
-                page.insert_text(fitz.Point(x, y), run, fontsize=size,
-                                 fontname=FB_NAME if use_fb else FONT_NAME)
-                x += font.width(run, size)
+            for gi, (text, emph) in enumerate(groups):
+                if gi:
+                    x += space_w
+                gw = font.width(text, size)
+                if emph:                      # 노란 형광펜
+                    page.draw_rect(fitz.Rect(x - 0.5, y - size * 0.92, x + gw + 0.5, y + size * 0.26),
+                                   color=None, fill=EMPH_BG)
+                for run, use_fb in font.runs(text):
+                    page.insert_text(fitz.Point(x, y), run, fontsize=size,
+                                     fontname=FB_NAME if use_fb else FONT_NAME,
+                                     color=EMPH_COLOR if emph else TEXT_COLOR)
+                    x += font.width(run, size)
         y += lh
 
     return [pi, wi], len(lines)
@@ -385,7 +427,12 @@ def upload_to_drive(pdf_bytes, file_name, progress_bar, folder_id=None, chunk_mb
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="centered")
 
-st.title("📒 PDF 여백 생성 + 대본 매칭")
+st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
+st.markdown("슬라이드를 A4 가로 크기로 통일한 뒤 여백을 만들고 대본을 넣습니다. 대본이 길면 글씨를 줄이지 않고 "
+            "**축소 슬라이드가 붙은 이어쓰기 페이지**를 추가합니다.  \n"
+            "대본에 `**이렇게**` 또는 `==이렇게==` 표시한 부분은 "
+            "<span style='background:#FFEE59;color:#CC0D0D'>빨간 글씨 + 노란 형광펜</span>으로 나옵니다.",
+            unsafe_allow_html=True)
 st.write("---")
 
 st.subheader("1️⃣ PDF 파일 업로드")
@@ -398,7 +445,7 @@ with tab1:
     pasted_text = st.text_area(
         "클로바노트 등에서 복사한 대본을 여기에 붙여넣으세요.",
         height=200,
-        placeholder="형식 예시:\n[1페이지] 첫 번째 슬라이드 내용입니다.\n[2페이지] 두 번째 슬라이드 설명...\n\n※ 빈칸으로 두면 여백만 생성됩니다."
+        placeholder="형식 예시:\n[1페이지] 첫 번째 슬라이드 내용입니다.\n[2페이지] **이 문장은 강조됩니다** 나머지는 보통 글씨...\n\n※ 빈칸으로 두면 여백만 생성됩니다."
     )
 
 with tab2:
