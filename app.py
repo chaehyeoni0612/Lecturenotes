@@ -120,28 +120,35 @@ def parse_script_bytes(txt_bytes):
 
 # --- 텍스트를 문단/단어 토큰으로 분해 (**강조** 표시 인식) ---
 def tokenize(text):
-    paragraphs = []
-    for para in text.split("\n"):
-        # 글자마다 강조 여부를 매긴 뒤 공백으로 끊어 단어를 만든다
-        chars, pos = [], 0
-        for m in EMPH_RE.finditer(para):
-            chars += [(c, False) for c in para[pos:m.start()]]
-            chars += [(c, True) for c in (m.group(1) or m.group(2))]
-            pos = m.end()
-        chars += [(c, False) for c in para[pos:]]
+    # 글자마다 강조 여부를 먼저 매긴다 (줄바꿈을 넘어가는 강조도 인식)
+    chars, pos = [], 0
+    for m in EMPH_RE.finditer(text):
+        chars += [(c, False) for c in text[pos:m.start()]]
+        chars += [(c, True) for c in (m.group(1) or m.group(2))]
+        pos = m.end()
+    chars += [(c, False) for c in text[pos:]]
 
-        words, cur, emph = [], "", False
-        for c, e in chars:
-            if c.isspace():
-                if cur:
-                    words.append([cur, emph])
-                    cur, emph = "", False
-            else:
-                cur += c
-                emph = emph or e          # 단어 일부만 강조돼도 그 단어 전체를 강조
+    # 줄바꿈으로 문단을, 공백으로 단어를 나눈다
+    paragraphs, words, cur, emph = [], [], "", False
+
+    def flush_word():
+        nonlocal cur, emph
         if cur:
             words.append([cur, emph])
-        paragraphs.append(words)
+            cur, emph = "", False
+
+    for c, e in chars:
+        if c == "\n":
+            flush_word()
+            paragraphs.append(words)
+            words = []
+        elif c.isspace():
+            flush_word()
+        else:
+            cur += c
+            emph = emph or e          # 단어 일부만 강조돼도 그 단어 전체를 강조
+    flush_word()
+    paragraphs.append(words)
     return paragraphs
 
 
