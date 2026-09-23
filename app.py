@@ -6,6 +6,7 @@ except ImportError:
 import re
 import os
 import urllib.request
+import base64
 import requests
 
 FONT_NAME = "kfont"
@@ -29,10 +30,14 @@ FONTS = {
         "https://cdn.jsdelivr.net/npm/@expo-google-fonts/ibm-plex-sans-kr@0.4.1/400Regular/IBMPlexSansKR_400Regular.ttf",
     ),
 }
-EMPH_RE = re.compile(r"\*\*(.+?)\*\*|==(.+?)==", re.S)   # **강조** 또는 ==강조==
+# **강조** / ==강조== → 빨간 글씨 + 노란 형광펜,  #잡담# → 회색 글씨
+STYLE_RE = re.compile(r"\*\*(.+?)\*\*|==(.+?)==|#([^#\n]+)#", re.S)
+EMPH, GRAY, PLAIN = "emph", "gray", ""
 EMPH_COLOR = (0.80, 0.05, 0.05)     # 강조 글씨색 (빨강)
 EMPH_BG = (1.0, 0.93, 0.35)         # 형광펜색 (노랑)
+GRAY_COLOR = (0.45, 0.45, 0.45)     # 잡담 글씨색 (회색)
 TEXT_COLOR = (0, 0, 0)
+STYLE_COLOR = {EMPH: EMPH_COLOR, GRAY: GRAY_COLOR, PLAIN: TEXT_COLOR}
 
 FALLBACK_LABEL = "Pretendard"       # 선택한 폰트에 없는 글자(ç, α 등)는 이 폰트로 찍음
 FB_NAME = "kfont_fb"
@@ -118,26 +123,28 @@ def parse_script_bytes(txt_bytes):
     return parse_script_text(text)
 
 
-# --- 텍스트를 문단/단어 토큰으로 분해 (**강조** 표시 인식) ---
+# --- 텍스트를 문단/단어 토큰으로 분해 (**강조**, #잡담# 표시 인식) ---
 def tokenize(text):
-    # 글자마다 강조 여부를 먼저 매긴다 (줄바꿈을 넘어가는 강조도 인식)
+    # 글자마다 꾸밈 종류를 먼저 매긴다 (줄바꿈을 넘어가는 강조도 인식)
     chars, pos = [], 0
-    for m in EMPH_RE.finditer(text):
-        chars += [(c, False) for c in text[pos:m.start()]]
-        chars += [(c, True) for c in (m.group(1) or m.group(2))]
+    for m in STYLE_RE.finditer(text):
+        chars += [(c, PLAIN) for c in text[pos:m.start()]]
+        inner = m.group(1) or m.group(2) or m.group(3)
+        style = GRAY if m.group(3) else EMPH
+        chars += [(c, style) for c in inner]
         pos = m.end()
-    chars += [(c, False) for c in text[pos:]]
+    chars += [(c, PLAIN) for c in text[pos:]]
 
     # 줄바꿈으로 문단을, 공백으로 단어를 나눈다
-    paragraphs, words, cur, emph = [], [], "", False
+    paragraphs, words, cur, cur_style = [], [], "", PLAIN
 
     def flush_word():
-        nonlocal cur, emph
+        nonlocal cur, cur_style
         if cur:
-            words.append([cur, emph])
-            cur, emph = "", False
+            words.append([cur, cur_style])
+            cur, cur_style = "", PLAIN
 
-    for c, e in chars:
+    for c, stl in chars:
         if c == "\n":
             flush_word()
             paragraphs.append(words)
@@ -146,7 +153,9 @@ def tokenize(text):
             flush_word()
         else:
             cur += c
-            emph = emph or e          # 단어 일부만 강조돼도 그 단어 전체를 강조
+            # 단어 일부만 표시돼도 그 단어 전체에 적용 (강조가 회색보다 우선)
+            if cur_style != EMPH and stl:
+                cur_style = stl
     flush_word()
     paragraphs.append(words)
     return paragraphs
@@ -175,11 +184,11 @@ def fill_box(page, rect, tokens, state, font, size):
         cur, cur_w = [], 0.0
         space_w = font.width(" ", size)
         while wi < len(words):
-            w, w_emph = words[wi]
+            w, w_style = words[wi]
             w_w = font.width(w, size)
             add_w = w_w if not cur else space_w + w_w
             if cur_w + add_w <= width:
-                cur.append((w, w_emph))
+                cur.append((w, w_style))
                 cur_w += add_w
                 wi += 1
             else:
@@ -192,8 +201,8 @@ def fill_box(page, rect, tokens, state, font, size):
                         acc += cw
                         k += 1
                     k = max(1, k)
-                    cur.append((w[:k], w_emph))
-                    words[wi] = [w[k:], w_emph]   # 나머지는 다음 줄로
+                    cur.append((w[:k], w_style))
+                    words[wi] = [w[k:], w_style]   # 나머지는 다음 줄로
                 break
 
         lines.append(cur)
@@ -204,7 +213,7 @@ def fill_box(page, rect, tokens, state, font, size):
     y = rect.y0 + size
     for ln in lines:
         if ln:
-            # 강조 여부가 같은 단어끼리 묶어서 (띄어쓰기 포함) 한 덩어리로 그림
+            # 꾸밈이 같은 단어끼리 묶어서 (띄어쓰기 포함) 한 덩어리로 그림
             groups = []
             for w, e in ln:
                 if groups and groups[-1][1] == e:
@@ -213,17 +222,17 @@ def fill_box(page, rect, tokens, state, font, size):
                     groups.append([w, e])
 
             x = rect.x0
-            for gi, (text, emph) in enumerate(groups):
+            for gi, (text, style) in enumerate(groups):
                 if gi:
                     x += space_w
                 gw = font.width(text, size)
-                if emph:                      # 노란 형광펜
+                if style == EMPH:             # 노란 형광펜
                     page.draw_rect(fitz.Rect(x - 0.5, y - size * 0.92, x + gw + 0.5, y + size * 0.26),
                                    color=None, fill=EMPH_BG)
                 for run, use_fb in font.runs(text):
                     page.insert_text(fitz.Point(x, y), run, fontsize=size,
                                      fontname=FB_NAME if use_fb else FONT_NAME,
-                                     color=EMPH_COLOR if emph else TEXT_COLOR)
+                                     color=STYLE_COLOR[style])
                     x += font.width(run, size)
         y += lh
 
@@ -349,7 +358,7 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
     return out_bytes
 
 
-# --- 구글 드라이브 (Apps Script: 폴더 목록 / 폴더 만들기 / 업로드 주소 발급) ---
+# --- 구글 드라이브 (Apps Script: 대본 TXT / 폴더 목록 / 폴더 만들기 / 업로드) ---
 def get_drive_config():
     try:
         cfg = st.secrets["drive"]
@@ -369,6 +378,18 @@ def drive_call(payload, timeout=60):
     if not info.get("ok"):
         raise RuntimeError(info.get("error", "알 수 없는 오류"))
     return info
+
+
+def list_drive_txt():
+    """반환: (TXT 폴더 이름, [{id, name, updated}, ...] 최근 수정 순)"""
+    info = drive_call({"action": "txtlist"})
+    return info.get("folderName", ""), info["files"]
+
+
+def fetch_drive_txt(file_id):
+    """반환: (파일 이름, 파일 내용 bytes)"""
+    info = drive_call({"action": "txtget", "fileId": file_id}, timeout=120)
+    return info["name"], base64.b64decode(info["base64"])
 
 
 def list_drive_folders():
@@ -438,7 +459,8 @@ st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
 st.markdown("슬라이드를 A4 가로 크기로 통일한 뒤 여백을 만들고 대본을 넣습니다. 대본이 길면 글씨를 줄이지 않고 "
             "**축소 슬라이드가 붙은 이어쓰기 페이지**를 추가합니다.  \n"
             "대본에 `**이렇게**` 또는 `==이렇게==` 표시한 부분은 "
-            "<span style='background:#FFEE59;color:#CC0D0D'>빨간 글씨 + 노란 형광펜</span>으로 나옵니다.",
+            "<span style='background:#FFEE59;color:#CC0D0D'>빨간 글씨 + 노란 형광펜</span>, "
+            "`#이렇게#` 표시한 잡담은 <span style='color:#737373'>회색 글씨</span>로 나옵니다.",
             unsafe_allow_html=True)
 st.write("---")
 
@@ -446,17 +468,66 @@ st.subheader("1️⃣ PDF 파일 업로드")
 uploaded_pdf = st.file_uploader("변환할 PDF 파일을 올려주세요", type=["pdf"])
 
 st.subheader("2️⃣ 강의 대본 입력 (선택)")
-tab1, tab2 = st.tabs(["📋 텍스트 직접 붙여넣기", "📄 TXT 파일 업로드"])
+st.caption("드라이브 → TXT 업로드 → 붙여넣기 순으로 먼저 채워진 것을 사용합니다.")
+tab_drive, tab_file, tab_paste = st.tabs(
+    ["☁️ 드라이브에서 가져오기", "📄 TXT 파일 업로드", "📋 텍스트 직접 붙여넣기"])
 
-with tab1:
+with tab_drive:
+    if get_drive_config() is None:
+        st.caption("앱 설정(Secrets)에 [drive] 항목을 넣으면 드라이브의 대본 TXT를 바로 쓸 수 있습니다.")
+    else:
+        dc1, dc2 = st.columns([5, 1])
+        with dc1:
+            if "drive_txt_list" not in st.session_state:
+                try:
+                    with st.spinner("드라이브에서 대본 TXT 목록 불러오는 중..."):
+                        st.session_state["drive_txt_list"] = list_drive_txt()
+                except Exception as e:
+                    st.error(f"TXT 목록을 불러오지 못했습니다: {e}")
+        with dc2:
+            st.write("")
+            st.write("")
+            if st.button("🔄", key="txt_refresh", help="TXT 목록 다시 불러오기",
+                         use_container_width=True):
+                st.session_state.pop("drive_txt_list", None)
+                st.rerun()
+
+        if "drive_txt_list" in st.session_state:
+            txt_folder_name, txt_files = st.session_state["drive_txt_list"]
+            if not txt_files:
+                st.info(f"'{txt_folder_name}' 폴더에 TXT 파일이 없습니다.")
+            else:
+                opts = ["(사용 안 함)"] + [f"{f['name']}  ·  {f['updated']}" for f in txt_files]
+                pick = st.selectbox(f"📄 '{txt_folder_name}' 폴더의 대본 TXT (최근 수정 순)", opts,
+                                    key="drive_txt_pick")
+                if pick != "(사용 안 함)":
+                    chosen = txt_files[opts.index(pick) - 1]
+                    if st.session_state.get("drive_txt_id") != chosen["id"]:
+                        try:
+                            with st.spinner(f"'{chosen['name']}' 불러오는 중..."):
+                                name, raw = fetch_drive_txt(chosen["id"])
+                            st.session_state["drive_txt_id"] = chosen["id"]
+                            st.session_state["drive_txt_data"] = (name, raw)
+                        except Exception as e:
+                            st.error(f"파일을 불러오지 못했습니다: {e}")
+                else:
+                    st.session_state.pop("drive_txt_id", None)
+                    st.session_state.pop("drive_txt_data", None)
+
+        if "drive_txt_data" in st.session_state:
+            name, raw = st.session_state["drive_txt_data"]
+            pages = len(parse_script_bytes(raw))
+            st.success(f"✅ **{name}** 사용 중 · {len(raw) / 1024:.0f}KB · 페이지 태그 {pages}개")
+
+with tab_file:
+    uploaded_txt = st.file_uploader("TXT 대본 파일을 업로드하세요", type=["txt"])
+
+with tab_paste:
     pasted_text = st.text_area(
         "클로바노트 등에서 복사한 대본을 여기에 붙여넣으세요.",
         height=200,
-        placeholder="형식 예시:\n[1페이지] 첫 번째 슬라이드 내용입니다.\n[2페이지] **이 문장은 강조됩니다** 나머지는 보통 글씨...\n\n※ 빈칸으로 두면 여백만 생성됩니다."
+        placeholder="형식 예시:\n[1페이지] 첫 번째 슬라이드 내용입니다.\n[2페이지] **이 문장은 강조됩니다** #이건 잡담이라 회색# ...\n\n※ 빈칸으로 두면 여백만 생성됩니다."
     )
-
-with tab2:
-    uploaded_txt = st.file_uploader("또는 TXT 대본 파일을 업로드하세요", type=["txt"])
 
 st.subheader("3️⃣ 설정")
 margin_side = st.radio("여백 위치", ["오른쪽", "왼쪽"], horizontal=True)
@@ -480,7 +551,9 @@ if uploaded_pdf is not None:
         status_text = st.empty()
         try:
             script_dict = {}
-            if uploaded_txt is not None:
+            if "drive_txt_data" in st.session_state:
+                script_dict = parse_script_bytes(st.session_state["drive_txt_data"][1])
+            elif uploaded_txt is not None:
                 script_dict = parse_script_bytes(uploaded_txt.getvalue())
             elif pasted_text.strip():
                 script_dict = parse_script_text(pasted_text)
