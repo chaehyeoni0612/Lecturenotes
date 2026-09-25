@@ -455,7 +455,7 @@ def upload_to_drive(pdf_bytes, file_name, progress_bar, folder_id=None, chunk_mb
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="centered")
 
-st.title("PDF 여백 생성 & 강의 대본 매칭기")
+st.title("PDF 강의 대본 매칭기")
 
 st.subheader("1️⃣ PDF 파일 업로드")
 uploaded_pdf = st.file_uploader("변환할 PDF 파일을 올려주세요", type=["pdf"])
