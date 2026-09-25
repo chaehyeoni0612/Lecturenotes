@@ -455,10 +455,10 @@ def upload_to_drive(pdf_bytes, file_name, progress_bar, folder_id=None, chunk_mb
 # --- Streamlit UI ---
 st.set_page_config(page_title="PDF 대본 매칭기", page_icon="📘", layout="centered")
 
-st.title("📘 PDF 여백 생성 & 강의 대본 매칭기")
+st.title("PDF 여백 생성 & 강의 대본 매칭기")
 st.markdown("슬라이드를 A4 가로 크기로 통일한 뒤 여백을 만들고 대본을 넣습니다. 대본이 길면 글씨를 줄이지 않고 "
             "**축소 슬라이드가 붙은 이어쓰기 페이지**를 추가합니다.  \n"
-            "대본에 `**이렇게**`표시한 부분은 <span style='background:#FFEE59;color:#CC0D0D'>빨간 글씨 + 노란 형광펜</span>, "
+            "대본에 `**이렇게**`표시한 부분은 <span style='background:#FFEE59;color:#CC0D0D'>빨간 글씨 + 노란 형광펜</span>, \n"
             "`#이렇게#` 표시한 잡담은 <span style='color:#737373'>회색 글씨</span>로 나옵니다.",
             unsafe_allow_html=True)
 st.write("---")
