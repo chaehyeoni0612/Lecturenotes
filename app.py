@@ -3,6 +3,7 @@ try:
     import pymupdf as fitz          # PyMuPDF 1.24.3+
 except ImportError:
     import fitz                     # 구버전 호환
+import io
 import re
 import os
 import base64
@@ -14,7 +15,7 @@ CM_TO_PT = 28.3465
 A4_W, A4_H = 841.89, 595.28         # A4 가로 (pt) — 모든 슬라이드를 이 크기로 통일
 
 # 글씨체: Pretendard (무료 OFL 폰트, jsDelivr 버전 고정 주소)
-FONT_NAME = "kfont"
+FONT_NAME = "scriptfont_hy"   # 강의록에 같은 이름 글꼴이 있으면 글자가 깨져서 고유하게 둠
 FONT_FILE = "Pretendard-Regular.ttf"
 FONT_URL = ("https://cdn.jsdelivr.net/npm/pretendard@1.3.9"
             "/dist/public/static/alternative/Pretendard-Regular.ttf")
@@ -67,6 +68,71 @@ class TextMeasurer:
                 cache[ch] = adv
             total += adv
         return total * size
+
+
+def _cff_to_truetype(data):
+    """OpenType-CFF 글꼴을 같은 글리프 순서의 TrueType(glyf) 글꼴로 변환"""
+    from fontTools.ttLib import TTFont, newTable
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    from fontTools.pens.cu2quPen import Cu2QuPen
+
+    font = TTFont(io.BytesIO(data))
+    order = font.getGlyphOrder()
+    gs = font.getGlyphSet()
+    glyphs = {}
+    for name in order:
+        pen = TTGlyphPen(None)
+        try:
+            gs[name].draw(Cu2QuPen(pen, max_err=1.0, reverse_direction=True))
+            glyphs[name] = pen.glyph()
+        except Exception:
+            glyphs[name] = TTGlyphPen(None).glyph()
+
+    glyf = newTable("glyf")
+    glyf.glyphOrder = order
+    glyf.glyphs = glyphs
+    font["glyf"] = glyf
+    font["loca"] = newTable("loca")
+    for tag in ("CFF ", "VORG"):
+        if tag in font:
+            del font[tag]
+    maxp = font["maxp"]
+    maxp.tableVersion = 0x00010000
+    for k in ("maxZones", "maxTwilightPoints", "maxStorage", "maxFunctionDefs",
+              "maxInstructionDefs", "maxStackElements", "maxSizeOfInstructions",
+              "maxComponentElements"):
+        setattr(maxp, k, 0)
+    maxp.maxZones = 1
+    font["head"].glyphDataFormat = 0
+    if "post" in font:
+        font["post"].formatType = 3.0
+    font.sfntVersion = "\x00\x01\x00\x00"
+    out = io.BytesIO()
+    font.save(out)
+    return out.getvalue()
+
+
+def repair_mislabeled_fonts(doc):
+    """TrueType 로 표시돼 있지만 실제로는 CFF('OTTO')인 글꼴을 진짜 TrueType 으로 바꿔 끼운다.
+    (삼성 노트 PDF 내보내기 문제: pdf.js·일부 태블릿 뷰어에서 해당 글자가 빈칸으로 보임)
+    반환: 고친 글꼴 개수"""
+    fixed = 0
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_get_key(xref, "Type")[1] != "/FontDescriptor":
+                continue
+            t, v = doc.xref_get_key(xref, "FontFile2")
+            if t != "xref":
+                continue
+            fx = int(v.split()[0])
+            data = doc.xref_stream(fx)
+            if data[:4] != b"OTTO":
+                continue
+            doc.update_stream(fx, _cff_to_truetype(data))
+            fixed += 1
+        except Exception:
+            continue
+    return fixed
 
 
 def parse_script_text(text):
@@ -241,6 +307,10 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
     progress_bar.progress(0, text="PDF 여는 중... 0%")
     doc = fitz.open(stream=input_pdf_bytes, filetype="pdf")
 
+    # 삼성 노트 등에서 내보낸 PDF의 잘못 표시된 글꼴(→, ⊣ 같은 기호가 빈칸이 되는 원인)을 바로잡음
+    progress_bar.progress(0, text="글꼴 점검 중... 0%")
+    repair_mislabeled_fonts(doc)
+
     # 강의록에 달린 주석(필기, 메모, 화살표 등)을 페이지 본문으로 고정.
     # 이걸 안 하면 페이지를 옮겨 담을 때 주석이 통째로 사라진다.
     try:
@@ -307,7 +377,8 @@ def process_pdf_with_script(input_pdf_bytes, script_dict, progress_bar, status_t
                               text=f"변환 중... {pct}% ({pno + 1} / {total_pages} 페이지)")
 
     progress_bar.progress(0.96, text="파일 저장 중... 96%")
-    out_doc.subset_fonts()
+    # subset_fonts() 는 쓰지 않는다: 강의록에 든 삼성 노트 글꼴 등을 줄이면서
+    # 화살표(→)·⊣ 같은 기호가 크롬/태블릿 뷰어에서 빈칸이 된다.
     out_bytes = out_doc.write(garbage=3, deflate=True)
     progress_bar.progress(1.0, text="완료 100%")
     doc.close()
