@@ -32,9 +32,15 @@ BOX_FILL = (0.88, 0.94, 1.0)
 BOX_BORDER = (0.55, 0.72, 0.90)
 BOX_BORDER_W = 0.6
 BOX_PAD = 6                         # 상자 안쪽 여백 (pt)
-BOX_BULLET = "•"
-BULLET_RE = re.compile(r"^[-•·]\s+")
 BOX_DROP_CHARS = {0xFE0F, 0x200D}   # 변형 선택자, 제로폭 접합자
+
+# 상자 항목 수준은 표시 문자로만 정한다 (들여쓰기 칸 수는 보지 않음)
+#   상위: • 또는 1. 2. …      하위: - 또는 ① ② …
+#   예전 파일 호환: 맨 앞(들여쓰기 0칸)의 - 는 상위로 취급하고 • 로 그린다
+TOP_RE = re.compile(r"^(•|\d+\.)(?:\s+|$)(.*)$")
+SUB_RE = re.compile(r"^(-|[①-⑳])(?:\s+|$)(.*)$")
+LEGACY_TOP_RE = re.compile(r"^-(?:\s+|$)(.*)$")
+TOP_BULLET = "•"
 
 # **강조** / ==강조== → 빨간 글씨 + 노란 형광펜,  #잡담# → 회색 글씨
 STYLE_RE = re.compile(r"\*\*(.+?)\*\*|==(.+?)==|#([^#\n]+)#", re.S)
@@ -186,12 +192,17 @@ def parse_script_bytes(txt_bytes):
 
 class Para(list):
     """문단: 단어 목록 + 종류(kind) + 핵심 상자 안 여부(in_box)
-    kind: 'text'(대본) | 'box_title'(상자 제목, 굵게) | 'box_item'(상자 항목, • 붙음) | 'gap'(상자와 대본 사이 빈 줄)"""
+    kind: 'text'(대본) | 'box_title'(상자 제목, 굵게) | 'box_item'(상자 항목) | 'gap'(상자와 대본 사이 빈 줄)
+    box_item 은 level(1=상위, 2=하위)과 marker(•, 1., -, ① 등)를 가진다"""
 
-    def __init__(self, words=(), kind="text", in_box=False):
+    def __init__(self, words=(), kind="text", in_box=False, level=1, marker="",
+                 parent_marker=TOP_BULLET):
         super().__init__(words)
         self.kind = kind
         self.in_box = in_box
+        self.level = level
+        self.marker = marker
+        self.parent_marker = parent_marker      # 하위 항목: 바로 위 상위 항목의 표시 문자
 
 
 def _tokenize_plain(text):
@@ -266,6 +277,24 @@ def _extract_boxes(text):
     return boxes, "\n".join(rest)
 
 
+def _classify_box_line(raw):
+    """상자 안 한 줄 → (kind, level, marker, 본문)
+    수준은 표시 문자로만 판별한다. 단, 들여쓰기 0칸의 - 는 예전 형식이라 상위로 본다"""
+    s = raw.strip()
+    starts_at_col0 = not raw[:1].isspace()
+    if starts_at_col0:
+        m = LEGACY_TOP_RE.match(s)
+        if m:
+            return "box_item", 1, TOP_BULLET, m.group(1)
+    m = TOP_RE.match(s)
+    if m:
+        return "box_item", 1, m.group(1), m.group(2)
+    m = SUB_RE.match(s)
+    if m:
+        return "box_item", 2, m.group(1), m.group(2)
+    return "box_title", 0, "", s
+
+
 def tokenize(text, has_glyph=None):
     """문단 → Para 목록. 핵심 상자(///)는 맨 위로 올려 box_title/box_item 문단으로 만든다"""
     boxes, rest = _extract_boxes(text)
@@ -274,21 +303,20 @@ def tokenize(text, has_glyph=None):
 
     paras = []
     for blines in boxes:
+        parent = TOP_BULLET
         for raw in blines:
-            s = raw.strip()
-            if not s:
+            if not raw.strip():
                 continue
-            m = BULLET_RE.match(s)
-            if m:                           # 항목: 글자 지우기는 변형 선택자류만
-                body = _clean_chars(s[m.end():], check_glyph=False).strip()
-                words = _tokenize_plain(body)[0]
-                kind = "box_item"
+            kind, level, marker, body = _classify_box_line(raw.replace("\t", "  "))
+            if kind == "box_item" and level == 1:
+                parent = marker
+            if kind == "box_item":          # 항목: 글자 지우기는 변형 선택자류만
+                body = _clean_chars(body, check_glyph=False).strip()
             else:                           # 제목: 이모지·글꼴에 없는 글자 제거
-                body = _clean_chars(s, has_glyph).strip()
-                words = _tokenize_plain(body)[0]
-                kind = "box_title"
+                body = _clean_chars(body, has_glyph).strip()
+            words = _tokenize_plain(body)[0] if body else []
             if words:
-                paras.append(Para(words, kind, True))
+                paras.append(Para(words, kind, True, level, marker, parent))
 
     rest = rest.strip()
     if rest:
@@ -308,11 +336,8 @@ def fill_box(page, rect, tokens, state, font, size, bold_font=None):
         return state, 0
 
     pi, wi = state
-    space_w = font.width(" ", size)
-    bullet = BOX_BULLET if font.font.has_glyph(ord(BOX_BULLET)) else "·"
-    bullet_w = font.width(bullet + " ", size)
 
-    lines = []      # 각 줄: dict(words, y, x, font, fname, bullet)
+    lines = []      # 각 줄: dict(words, y, x, f, fname, marker, mx)
     runs = []       # 상자 줄이 이어진 구간 [위, 아래]
     used, prev_box = 0.0, False
 
@@ -349,15 +374,22 @@ def fill_box(page, rect, tokens, state, font, size, bold_font=None):
 
         f = bold_font if kind == "box_title" else font
         x = rect.x0
-        width = rect.width
+        right = rect.x1
+        marker, mx = "", None
         is_first = wi == 0
         if in_box:
             x += pad
-            width -= 2 * pad
-            if kind == "box_item":          # 걸어 내어쓰기: 줄바꿈된 줄은 • 뒤 글자에 맞춤
-                x += bullet_w
-                width -= bullet_w
-        width = max(width, size)
+            right -= pad
+            if kind == "box_item":
+                # 수준별 들여쓰기 + 내어쓰기: 줄바꿈된 줄은 표시 문자 뒤 글자에 맞춤
+                # 하위 항목의 표시 문자는 바로 위 상위 항목의 본문 시작점에 둔다
+                mx = x
+                if words.level == 2:
+                    mx += font.width(words.parent_marker + " ", size)
+                x = mx + font.width(words.marker + " ", size)
+                if is_first:
+                    marker = words.marker
+        width = max(right - x, size)
 
         cur, cur_w = [], 0.0
         sp = f.width(" ", size)
@@ -385,8 +417,7 @@ def fill_box(page, rect, tokens, state, font, size, bold_font=None):
 
         lines.append({"words": cur, "y": ytop, "x": x, "f": f,
                       "fname": FONT_BOLD_NAME if kind == "box_title" else FONT_NAME,
-                      "bullet": kind == "box_item" and is_first,
-                      "bx": rect.x0 + pad})
+                      "marker": marker, "mx": mx})
         if wi >= len(words):
             pi += 1
             wi = 0
@@ -402,8 +433,8 @@ def fill_box(page, rect, tokens, state, font, size, bold_font=None):
             continue
         y = ln["y"] + size
         f, fname = ln["f"], ln["fname"]
-        if ln["bullet"]:
-            page.insert_text(fitz.Point(ln["bx"], y), bullet, fontsize=size,
+        if ln["marker"]:
+            page.insert_text(fitz.Point(ln["mx"], y), ln["marker"], fontsize=size,
                              fontname=FONT_NAME, color=TEXT_COLOR)
         groups = []                         # 꾸밈이 같은 단어끼리 묶어서 그림
         for w, e in ln["words"]:
