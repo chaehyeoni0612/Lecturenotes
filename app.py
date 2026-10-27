@@ -37,8 +37,10 @@ BOX_DROP_CHARS = {0xFE0F, 0x200D}   # 변형 선택자, 제로폭 접합자
 # 상자 항목 수준은 표시 문자로만 정한다 (들여쓰기 칸 수는 보지 않음)
 #   상위: • 또는 1. 2. …      하위: - 또는 ① ② …
 #   예전 파일 호환: 맨 앞(들여쓰기 0칸)의 - 는 상위로 취급하고 • 로 그린다
-TOP_RE = re.compile(r"^(•|\d+\.)(?:\s+|$)(.*)$")
-SUB_RE = re.compile(r"^(-|[①-⑳])(?:\s+|$)(.*)$")
+#   1. A. ①  은 들여쓰기 0칸이면 상위, 들여쓰기가 있으면 하위
+TOP_RE = re.compile(r"^(•|\d+\.|[A-Z]\.)(?:\s+|$)(.*)$")
+SUB_RE = re.compile(r"^(-|[①-⑳]|\d+\.|[A-Z]\.)(?:\s+|$)(.*)$")
+CIRC_RE = re.compile(r"^([①-⑳])(?:\s+|$)(.*)$")
 LEGACY_TOP_RE = re.compile(r"^-(?:\s+|$)(.*)$")
 TOP_BULLET = "•"
 
@@ -288,8 +290,12 @@ def _classify_box_line(raw):
         if m:
             return "box_item", 1, TOP_BULLET, m.group(1)
     m = TOP_RE.match(s)
-    if m:
+    if m and (starts_at_col0 or m.group(1) == TOP_BULLET):
         return "box_item", 1, m.group(1), m.group(2)
+    if starts_at_col0:
+        m = CIRC_RE.match(s)
+        if m:
+            return "box_item", 1, m.group(1), m.group(2)
     m = SUB_RE.match(s)
     if m:
         return "box_item", 2, m.group(1), m.group(2)
