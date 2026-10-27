@@ -192,7 +192,8 @@ def parse_script_bytes(txt_bytes):
 
 class Para(list):
     """문단: 단어 목록 + 종류(kind) + 핵심 상자 안 여부(in_box)
-    kind: 'text'(대본) | 'box_title'(상자 제목, 굵게) | 'box_item'(상자 항목) | 'gap'(상자와 대본 사이 빈 줄)
+    kind: 'text'(대본) | 'box_title'(상자 첫 줄 제목, 굵게) | 'box_item'(상자 항목)
+          | 'box_text'(상자 안 표시 문자 없는 보통 줄) | 'gap'(상자와 대본 사이 빈 줄)
     box_item 은 level(1=상위, 2=하위)과 marker(•, 1., -, ① 등)를 가진다"""
 
     def __init__(self, words=(), kind="text", in_box=False, level=1, marker="",
@@ -304,16 +305,20 @@ def tokenize(text, has_glyph=None):
     paras = []
     for blines in boxes:
         parent = TOP_BULLET
+        first = True                        # 상자의 첫 번째 줄인지
         for raw in blines:
             if not raw.strip():
                 continue
             kind, level, marker, body = _classify_box_line(raw.replace("\t", "  "))
+            if kind == "box_title" and not first:
+                kind = "box_text"           # 표시 문자 없는 줄: 첫 줄만 굵은 제목, 나머지는 보통 글씨
+            first = False
             if kind == "box_item" and level == 1:
                 parent = marker
-            if kind == "box_item":          # 항목: 글자 지우기는 변형 선택자류만
-                body = _clean_chars(body, check_glyph=False).strip()
-            else:                           # 제목: 이모지·글꼴에 없는 글자 제거
+            if kind == "box_title":         # 제목: 이모지·글꼴에 없는 글자 제거
                 body = _clean_chars(body, has_glyph).strip()
+            else:                           # 항목·보통 줄: 글자 지우기는 변형 선택자류만
+                body = _clean_chars(body, check_glyph=False).strip()
             words = _tokenize_plain(body)[0] if body else []
             if words:
                 paras.append(Para(words, kind, True, level, marker, parent))
